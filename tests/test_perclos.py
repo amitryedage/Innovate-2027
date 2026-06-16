@@ -23,10 +23,10 @@ failed = 0
 def check(name, condition, expected=None, got=None):
     global passed, failed
     if condition:
-        print(f"  ✅ {name}")
+        print(f"   {name}")
         passed += 1
     else:
-        print(f"  ❌ {name}")
+        print(f"   {name}")
         if expected is not None:
             print(f"     Expected: {expected}")
             print(f"     Got:      {got}")
