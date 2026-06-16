@@ -1,3 +1,4 @@
+
 import sqlite3
 import uuid
 import os
@@ -8,7 +9,17 @@ from config import (
     MANAGER_PIN_DEFAULT, MIN_EVENT_THRESHOLD
 )
 
+
+
+# CONNECTION HELPER
+
+
 def get_connection():
+    """
+    Returns a SQLite connection with WAL mode enabled.
+    WAL = Write-Ahead Logging — prevents DB corruption on crash.
+    Call this every time you need a DB connection.
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row          # rows behave like dicts
@@ -16,17 +27,18 @@ def get_connection():
     conn.execute("PRAGMA foreign_keys=ON")  # enforce FK constraints
     return conn
 
-#Database schema design:
-# 1. operators: operator_id (PK), name, pin_hash, baseline_ear
-#2. sessions: session_id (PK), operator_id (FK), machine_id, start_time, end_time, status, last_checkpoint, perclos_checkpoint
-#3. events: event_id (PK), session_id (FK), timestamp, event_type, ear_value, mar_value, pitch_value, perclos_value, fatigue_score, alert_level, acknowledged, ack_time_sec, clip_path
-#4. audit_log: log_id (PK), timestamp, action, actor, session_id (nullable), detail
-#5. system_config: key (PK), value, min_value, updated_at
-#we can add more according to the requirement but these are the basic tables we need to start with and we can add more tables if required in future
+
+# TABLE CREATION — CREATE ALL 5 TABLES
+#ADD more if required 
 
 def create_tables():
+    """
+    Creates all 5 tables if they do not already exist.
+    Safe to call on every startup — uses IF NOT EXISTS.
+    """
     conn = get_connection()
     try:
+        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS operators (
                 operator_id     TEXT PRIMARY KEY,
@@ -40,6 +52,8 @@ def create_tables():
                 last_seen       TEXT
             )
         """)
+
+        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id          TEXT PRIMARY KEY,
@@ -56,6 +70,7 @@ def create_tables():
                 FOREIGN KEY (operator_id) REFERENCES operators(operator_id)
             )
         """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id        TEXT PRIMARY KEY,
@@ -75,6 +90,8 @@ def create_tables():
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             )
         """)
+
+    
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 log_id      TEXT PRIMARY KEY,
@@ -85,6 +102,8 @@ def create_tables():
                 detail      TEXT
             )
         """)
+
+       
         conn.execute("""
             CREATE TABLE IF NOT EXISTS system_config (
                 key         TEXT PRIMARY KEY,
@@ -143,6 +162,11 @@ def _seed_demo_operator(conn):
         conn.commit()
         print("[DB] Demo operator OP001 created.")
 
+
+
+# OPERATOR FUNCTIONS
+
+
 def get_operator(operator_id: str):
     """Fetch operator profile. Returns dict or None if not found."""
     conn = get_connection()
@@ -158,8 +182,7 @@ def get_operator(operator_id: str):
 def update_operator_baseline(operator_id: str, baseline_ear: float,
                               baseline_mar: float, baseline_pitch: float,
                               glasses_mode: bool):
-# Update operator's baseline values after calibration.
-#glasses_mode is stored as INTEGER 0/1 in DB for simplicity.(SQLite does not have a native BOOLEAN type)
+    """Update operator's personal baseline after calibration."""
     conn = get_connection()
     try:
         conn.execute("""
@@ -176,6 +199,7 @@ def update_operator_baseline(operator_id: str, baseline_ear: float,
 
 
 def get_all_operators():
+    """Return list of all operators — for login screen dropdown."""
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -186,8 +210,15 @@ def get_all_operators():
         conn.close()
 
 
+#Function activate when manager change the operator's baseline thresholds from the manager dashboard. This allows the manager to adjust the thresholds for an operator based on their specific needs or conditions, providing a more personalized fatigue detection experience.
+# SESSION FUNCTIONS
+
+
 def open_session(operator_id: str, demo_mode: bool = False) -> str:
-   #Every time new session Id get generated
+    """
+    Open a new shift session for the operator.
+    Returns session_id (UUID string).
+    """
     session_id = str(uuid.uuid4())
     machine_id = get_config("machine_id") or "LAPTOP-DEMO"
     conn = get_connection()
@@ -207,6 +238,7 @@ def open_session(operator_id: str, demo_mode: bool = False) -> str:
 
 
 def close_session(session_id: str):
+    """Mark session as CLOSED with end time."""
     conn = get_connection()
     try:
         conn.execute("""
@@ -222,6 +254,11 @@ def close_session(session_id: str):
 
 
 def get_active_session():
+    """
+    Check for any ACTIVE sessions on startup.
+    If found, system was previously crashed — crash recovery needed.
+    Returns session dict or None.
+    """
     conn = get_connection()
     try:
         row = conn.execute(
@@ -233,6 +270,7 @@ def get_active_session():
 
 
 def mark_session_crashed(session_id: str):
+    """Mark a session as CRASHED — called when unclean exit detected."""
     conn = get_connection()
     try:
         conn.execute(
@@ -247,6 +285,10 @@ def mark_session_crashed(session_id: str):
 
 def update_checkpoint(session_id: str, perclos_value: float,
                       threshold_raised: float = 0.0):
+    """
+    Write PERCLOS state checkpoint to DB every 60 seconds.
+    On crash recovery, this value is restored to resume monitoring.
+    """
     conn = get_connection()
     try:
         conn.execute("""
@@ -259,12 +301,24 @@ def update_checkpoint(session_id: str, perclos_value: float,
         conn.close()
 
 
+
+# EVENT FUNCTIONS
+#Keep store all events in the database, but only save clips for Level 3 fatigue events to conserve storage. This allows for comprehensive reporting and analysis while managing disk space effectively.
+
 def insert_event(session_id: str, event_type: str,
                  ear_value: float = None, mar_value: float = None,
                  pitch_value: float = None, perclos_value: float = None,
                  fatigue_score: float = None, alert_level: int = 0,
                  clip_path: str = None) -> str:
-   
+    """
+    Insert a fatigue/face-loss/tamper event.
+    Returns event_id.
+
+    event_type options:
+        FATIGUE_L1, FATIGUE_L2, FATIGUE_L3
+        FACE_LOSS, TAMPER, LOW_LIGHT
+        CAMERA_ERROR, STORAGE_LOW
+    """
     event_id = str(uuid.uuid4())
     conn = get_connection()
     try:
@@ -284,6 +338,7 @@ def insert_event(session_id: str, event_type: str,
 
 
 def acknowledge_event(event_id: str, ack_time_sec: float):
+    """Mark event as acknowledged with response time."""
     conn = get_connection()
     try:
         conn.execute("""
@@ -297,6 +352,7 @@ def acknowledge_event(event_id: str, ack_time_sec: float):
 
 
 def get_session_events(session_id: str):
+    """Get all events for a session — used for PDF report generation."""
     conn = get_connection()
     try:
         rows = conn.execute("""
@@ -332,8 +388,21 @@ def get_session_summary(session_id: str) -> dict:
         conn.close()
 
 
+# AUDIT LOG FUNCTIONS
+#Apply when any fatigue event is acknowledged, thresholds are changed, clips are accessed, or manager logs in. Critical for compliance and post-incident review.
+
 def write_audit_log(action: str, actor: str,
                     session_id: str = None, detail: str = None):
+    """
+    Write an audit log entry.
+
+    action options:
+        SESSION_START, SESSION_END, CRASH
+        CLIP_ACCESS, THRESHOLD_CHANGE
+        MANAGER_LOGIN, REPORT_EXPORT
+        SYSTEM_START, PDF_FAILED
+    actor: SYSTEM | MANAGER | OPERATOR
+    """
     conn = get_connection()
     try:
         conn.execute("""
@@ -345,6 +414,8 @@ def write_audit_log(action: str, actor: str,
         conn.close()
 
 
+
+# SYSTEM CONFIG FUNCTIONS
 
 
 def get_config(key: str) -> str:
@@ -360,6 +431,11 @@ def get_config(key: str) -> str:
 
 
 def set_config(key: str, value: str, actor: str = "MANAGER"):
+    """
+    Update a config value.
+    Enforces min_value floor — cannot be set below privacy minimum.
+    Logs change in audit_log.
+    """
     conn = get_connection()
     try:
         row = conn.execute(
@@ -381,8 +457,14 @@ def set_config(key: str, value: str, actor: str = "MANAGER"):
 
 
 
+# STORAGE CLEANUP
+#Remove clips older than CLIP_RETENTION_DAYS when session closes. Called from main.py shutdown().
 
 def auto_delete_old_clips():
+    """
+    Delete event records (and their clips) older than CLIP_RETENTION_DAYS.
+    Called at every session close.
+    """
     cutoff = (datetime.now() - timedelta(days=CLIP_RETENTION_DAYS)).isoformat()
     conn = get_connection()
     try:
@@ -414,14 +496,15 @@ def auto_delete_old_clips():
         conn.close()
 
 
-#Utiliy are basic functions which are used in different part of project and these are not related to database but these are used in database for example _now() function is used to get current time in ISO format which is used in database for timestamp and other fields and these utility functions can be used in other part of project as well if required.
 
+# UTILITY
 def _now() -> str:
     """Returns current datetime as ISO format string."""
     return datetime.now().isoformat()
 
-
+#verify_database function is moved to the end of this file because it is called in the download_model.py after downloading the model to verify if the model is working correctly with the database.
 def verify_database():
+   
     conn = get_connection()
     try:
         tables = conn.execute(
