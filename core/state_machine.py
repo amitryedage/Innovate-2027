@@ -1,5 +1,13 @@
 from enum import Enum, auto
+
+# SYSTEM STATES
+
+
 class SystemState(Enum):
+    """
+    Every state the system can be in.
+    Only one state is active at a time.
+    """
     STARTUP          = auto()  # initial boot — checking for crashes
     CRASH_RECOVERY   = auto()  # crashed session found — restoring state
     WAITING_OPERATOR = auto()  # idle — waiting for RFID/PIN login
@@ -14,6 +22,7 @@ class SystemState(Enum):
     SHUTTING_DOWN    = auto()  # application closing — all threads exiting
 
 
+# VALID TRANSITIONS
 
 
 # Maps: current_state -> set of states it can transition TO
@@ -21,7 +30,7 @@ class SystemState(Enum):
 VALID_TRANSITIONS = {
 
     SystemState.STARTUP: {
-        SystemState.CRASH_RECOVERY,   
+        SystemState.CRASH_RECOVERY,   # crashed session found on boot
         SystemState.WAITING_OPERATOR, # clean start
     },
 
@@ -64,15 +73,15 @@ VALID_TRANSITIONS = {
     },
 
     SystemState.ALERT_L1: {
-        SystemState.MONITORING,       
-        SystemState.ALERT_L2,        
+        SystemState.MONITORING,       # operator acknowledged OR score dropped
+        SystemState.ALERT_L2,         # not acknowledged in 30s OR score rose
         SystemState.SESSION_CLOSING,
         SystemState.SHUTTING_DOWN,
     },
 
     SystemState.ALERT_L2: {
-        SystemState.MONITORING,       
-        SystemState.ALERT_L3,        
+        SystemState.MONITORING,       # acknowledged OR score dropped
+        SystemState.ALERT_L3,         # not acknowledged in 30s OR score rose
         SystemState.SESSION_CLOSING,
         SystemState.SHUTTING_DOWN,
     },
@@ -96,7 +105,10 @@ VALID_TRANSITIONS = {
 
 
 
+
 class StateMachine:
+    
+
     def __init__(self):
         self._state = SystemState.STARTUP
         self._history = [SystemState.STARTUP]
@@ -106,11 +118,7 @@ class StateMachine:
         return self._state
 
     def transition(self, new_state: SystemState) -> bool:
-        """
-        Attempt to transition to new_state.
-        Returns True if successful.
-        Raises InvalidTransitionError if not allowed.
-        """
+        
         allowed = VALID_TRANSITIONS.get(self._state, set())
 
         if new_state not in allowed:
@@ -128,6 +136,7 @@ class StateMachine:
         return True
 
     def can_transition(self, new_state: SystemState) -> bool:
+       
         return new_state in VALID_TRANSITIONS.get(self._state, set())
 
     def get_allowed_transitions(self):
@@ -143,7 +152,10 @@ class StateMachine:
         }
 
     def is_monitoring_active(self) -> bool:
-        """Returns True if in a state where monitoring should be active."""
+        """
+        Returns True if PERCLOS engine should be running.
+        False during calibration, login, shutdown.
+        """
         return self._state in {
             SystemState.MONITORING,
             SystemState.ALERT_L1,
@@ -167,13 +179,13 @@ class StateMachine:
         return f"StateMachine(state={self._state.name})"
 
 
-
-# CUSTOM EXCEPTION(We can make changes with real world implemation)
-
+# CUSTOM EXCEPTION
+# Raised when an invalid state transition is attempted.
 
 class InvalidTransitionError(Exception):
     """Raised when an invalid state transition is attempted."""
     pass
+
 
 
 
@@ -205,10 +217,10 @@ if __name__ == "__main__":
         try:
             sm._state = from_s
             sm.transition(to_s)
-            print(f"  ❌ Should have FAILED: {from_s.name} → {to_s.name}")
+            print(f"  Should have FAILED: {from_s.name} → {to_s.name}")
             tests_fail += 1
         except InvalidTransitionError:
-            print(f"   Correctly blocked: {from_s.name} → {to_s.name}")
+            print(f" Correctly blocked: {from_s.name} → {to_s.name}")
             tests_pass += 1
 
     print("\nValid transitions:")
@@ -232,6 +244,6 @@ if __name__ == "__main__":
 
     print(f"\nResults: {tests_pass} passed, {tests_fail} failed")
     if tests_fail == 0:
-        print(" State machine is working correctly.")
+        print("State machine is working correctly.")
     else:
         print(" Fix the failures before proceeding.")
