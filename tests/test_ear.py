@@ -1,4 +1,3 @@
-# =============================================================
 # test_ear.py — Verify EAR, MAR, and head pitch calculations
 #This test suite checks the mathematical correctness of the core formulas used in fatigue detection:
 # - EAR (Eye Aspect Ratio) for open vs closed eyes
