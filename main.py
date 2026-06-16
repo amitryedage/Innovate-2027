@@ -145,7 +145,7 @@ def simple_alert_worker():
 
 def demo_login():
     print("\n" + "="*55)
-    print("  FATIGUE DETECTION — DAY 2 TEST")
+    print("  FATIGUE DETECTION")
     print("="*55)
     print("  Operator : OP001 — Demo Operator")
     print("  Controls : Q = quit | SPACE = acknowledge alert")
@@ -161,7 +161,6 @@ def demo_login():
 
     print(f"[MAIN] Session opened: {session_id}")
     state_machine.transition(SystemState.CALIBRATING)
-    # Skip calibration for Day 2 — go straight to monitoring
     state_machine.transition(SystemState.MONITORING)
     print("[MAIN] State: MONITORING — detection active\n")
     return session_id
@@ -172,7 +171,7 @@ def display_loop():
     print("[MAIN] Video window open. Press Q to quit.\n")
 
     while not shutdown_event.is_set():
-        # Get latest annotated frame
+        
         with frame_lock:
             frame = frame_buffer.get("annotated")
             if frame is None:
@@ -181,7 +180,7 @@ def display_loop():
         if frame is not None:
             cv2.imshow("Fatigue Detection ", frame)
 
-        # Print metrics every 2 seconds
+        
         now = time.time()
         if now - last_print >= 2.0:
             with session_lock:
