@@ -1,12 +1,6 @@
-
-# config.py — Single source of truth for ALL constants
-# Rule: Never hardcode any value anywhere else in the project
-# If you need to change a threshold, change it HERE only
-#Before making any change please have look of that change in entire project and make change if required 
-
 import os
-
 # PROJECT PATHS
+
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR        = os.path.join(BASE_DIR, "data")
 CLIPS_DIR       = os.path.join(DATA_DIR, "clips")
@@ -17,6 +11,7 @@ DB_PATH         = os.path.join(DATA_DIR, "fatigue.db")
 
 
 # CAMERA SETTINGS
+
 CAMERA_INDEX    = 0          # 0 = default webcam
 FRAME_WIDTH     = 480        # resize width before AI processing
 FRAME_HEIGHT    = 360        # resize height before AI processing
@@ -28,12 +23,11 @@ CRITICAL_LIGHT_THRESH = 15   # below this = log LOW_LIGHT event
 
 
 # MEDIAPIPE SETTINGS
-
-MAX_FACES  = 1
+MAX_FACES           = 1
 DETECTION_CONFIDENCE = 0.7
 TRACKING_CONFIDENCE  = 0.7
 
-# MediaPipe landmark indices — DO NOT CHANGE(FaceMesh provides 468 landmarks — these are the ones we use for fatigue detection)
+# MediaPipe landmark indices — DO NOT CHANGE
 # Left eye landmarks
 LEFT_EYE  = [33, 160, 158, 133, 153, 144]
 # Right eye landmarks
@@ -42,7 +36,6 @@ RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 MOUTH     = [61, 291, 13, 14, 78, 95, 308, 324]
 # Head pose reference landmarks
 HEAD_POSE = [1, 33, 263, 61, 291, 199]
-
 
 # EMA SMOOTHING
 EMA_ALPHA = 0.15   # smoothing factor — do not change without testing
@@ -65,7 +58,7 @@ PITCH_DROOP_THRESH  = 15.0   # degrees — head drooping forward
 PITCH_DROOP_SEC     = 3.0    # must sustain this long
 
 
-# FEATURE WEIGHTS — normal mode vs glasses mode(One of the main innovations of our system is dynamically adjusting feature weights based on glasses detection — this allows us to maintain accuracy without needing separate models or manual mode switching)
+# FEATURE WEIGHTS — normal mode vs glasses mode (one of our usp of the system is dynamic weighting based on glasses detection)
 WEIGHT_EAR_NORMAL   = 1.0    # EAR is primary signal in normal mode
 WEIGHT_MAR_NORMAL   = 0.3    # MAR is secondary
 WEIGHT_PITCH_NORMAL = 0.3    # pitch is secondary
@@ -73,6 +66,7 @@ WEIGHT_PITCH_NORMAL = 0.3    # pitch is secondary
 WEIGHT_EAR_GLASSES  = 0.40   # EAR less reliable with glasses
 WEIGHT_MAR_GLASSES  = 0.35   # MAR becomes primary
 WEIGHT_PITCH_GLASSES= 0.35   # pitch becomes primary
+
 
 # PERCLOS ENGINE
 PERCLOS_WINDOW_SEC  = 60     # rolling window duration in seconds
@@ -109,13 +103,13 @@ FAST_ACK_MAX_RAISE  = 0.05   # HARD CEILING — never raise more than this total
                               # Safety: prevents system becoming too lenient
 
 
-# FACE LOSS POLICY
+# FACE LOSS POLICY (Adjustable settings for handling face loss events — can be tuned based on environment)
 FACE_LOSS_PAUSE_SEC     = 3.0    # < 3s = pause PERCLOS, no action
 FACE_LOSS_LOG_SEC       = 10.0   # 3-10s = log FACE_LOSS event
 FACE_LOSS_ALERT_SEC     = 30.0   # > 30s = camera obstruction alert
 
 
-# CALIBRATION
+# CALIBRATION(Fexible calibration settings for different environments)
 CALIBRATION_DURATION_SEC    = 120    # 2 minutes = 3600 frames
 CALIBRATION_MIN_FACE_PCT    = 0.80   # minimum 80% face detection for valid calibration
 CALIBRATION_RETRY_LIMIT     = 1      # retry once before aborting
@@ -125,7 +119,8 @@ CALIBRATION_PROMPT_FACE_PCT = 0.60   # below this = voice prompt to look at came
 DEMO_CALIBRATION_SEC        = 10     # calibration completes in 10s in demo mode
 DEMO_L1_THRESH              = 0.05   # much tighter threshold for fast demo alerts
 
-# STORAGE
+
+# STORAGE(We can change according to our requirements)
 CLIP_DURATION_PRE_SEC   = 5      # seconds before event to include in clip
 CLIP_DURATION_POST_SEC  = 5      # seconds after event to include in clip
 CLIP_WIDTH              = 640    # clip resolution width
@@ -139,18 +134,18 @@ CLIP_RETENTION_DAYS     = 7      # auto-delete clips older than this
 EVENT_RETENTION_DAYS    = 30     # auto-delete event records older than this
 AUDIT_RETENTION_DAYS    = 90     # auto-delete audit records older than this
 
+
 # CHECKPOINT
-CHECKPOINT_INTERVAL_SEC = 60   
+CHECKPOINT_INTERVAL_SEC = 60     # write PERCLOS state to DB every 60 seconds
 
-
-# THREAD SETTINGS(Adjust these based on our  system's capabilities and desired responsiveness)
+# THREAD SETTINGS
 UI_REFRESH_FPS          = 15     # dashboard refresh rate (half of detection)
 DB_QUEUE_MAX            = 50     # max items in db_queue before dropping
 ALERT_QUEUE_MAX         = 3      # max items in alert_queue — drop stale alerts
 
 
-# AUDIO FILES(must be in ASSETS_DIR/audio/)
-AUDIO_L1_BEEP       = "l1_beep.mp3"
+# AUDIO FILES
+AUDIO_L1_BEEP       = "l1_beep.mp3" #Need to create this files 
 AUDIO_L2_HINDI      = "l2_hindi.mp3"
 AUDIO_L2_MARATHI    = "l2_marathi.mp3"
 AUDIO_L3_HINDI      = "l3_hindi.mp3"
@@ -159,14 +154,15 @@ AUDIO_CAMERA_CHECK  = "camera_check.mp3"
 AUDIO_CALIBRATION   = "calibration_start.mp3"
 
 # Default language for alerts
-DEFAULT_LANGUAGE    = "marathi"   # options: "hindi", "marathi"
+DEFAULT_LANGUAGE    = "marathi"   # options: "hindi", "marathi , any other as well"
 
 
-# PRIVACY (We need to change when real world implenation with the help of pin system or RFID system )
-MANAGER_PIN_DEFAULT = "1234"    
-MIN_EVENT_THRESHOLD = 0.30      
+# PRIVACY
+MANAGER_PIN_DEFAULT = "1234"     # CHANGE THIS before any real deployment(use RFID or pin based login)
+MIN_EVENT_THRESHOLD = 0.30       # manager cannot lower L1 threshold below this
+                                 # privacy lock — prevents recording entire shift
 
+# DEMO MODE
 
-# DEMO MODE purpose only (Don't be tempted to set this to True in production — it weakens thresholds and speeds up calibration for quick testing, but is NOT safe for real use)
-
-DEMO_MODE = False   
+DEMO_MODE = False   # toggled at runtime by D+Enter shortcut
+                    # NEVER set to True in production
