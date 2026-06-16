@@ -1,44 +1,33 @@
-
-# main.py — Application entry point
-# Creates all shared objects, starts all 4 threads,
-# handles clean shutdown sequence.
-#Core working start from here 
 import sys
 import signal
 import threading
 import queue
 import time
 import os
-
+import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.state_machine import StateMachine, SystemState, InvalidTransitionError
-from core.database import (
+from core.state_machine  import StateMachine, SystemState
+from core.database       import (
     create_tables, verify_database, get_active_session,
-    mark_session_crashed, write_audit_log, open_session, close_session
+    mark_session_crashed, write_audit_log,
+    open_session, close_session, update_checkpoint
 )
-from config import ALERT_QUEUE_MAX, DB_QUEUE_MAX
+from core.detection      import DetectionThread
+from config              import ALERT_QUEUE_MAX, DB_QUEUE_MAX
 
 
+# SHARED OBJECTS — created once, passed to every thread
 
+state_machine    = StateMachine()
+alert_queue      = queue.Queue(maxsize=ALERT_QUEUE_MAX)
+db_queue         = queue.Queue(maxsize=DB_QUEUE_MAX)
+frame_buffer     = {"frame": None, "annotated": None, "raw": None}
+frame_lock       = threading.Lock()
+ack_event        = threading.Event()
+shutdown_event   = threading.Event()
 
-# State machine — single source of truth for system state
-state_machine = StateMachine()
-
-# Thread communication queues
-alert_queue = queue.Queue(maxsize=ALERT_QUEUE_MAX)
-db_queue    = queue.Queue(maxsize=DB_QUEUE_MAX)
-
-# Shared frame buffer for UI — protected by lock
-frame_buffer      = {"frame": None}
-frame_buffer_lock = threading.Lock()
-
-# Events
-ack_event      = threading.Event()   # operator presses ack button
-shutdown_event = threading.Event()   # signals all threads to exit cleanly
-
-# Session state — shared across threads
 session_state = {
     "session_id":       None,
     "operator_id":      None,
@@ -50,171 +39,244 @@ session_state = {
     "baseline_pitch":   2.0,
     "glasses_mode":     False,
     "perclos_current":  0.0,
+    "fatigue_score":    0.0,
+    "face_detected":    True,
     "threshold_raised": 0.0,
+    "brightness":       100.0,
+    "current_ear":      0.0,
+    "current_mar":      0.0,
+    "current_pitch":    0.0,
+    "fps":              0,
 }
-session_lock = threading.Lock()
-
-# Thread references — stored so we can join them on shutdown
-threads = {}
-
-
+session_lock  = threading.Lock()
+threads       = {}
 SHUTDOWN_SENTINEL = "SHUTDOWN"
 
 
-
-
+# STARTUP CRASH RECOVERY
 def startup_check():
     print("[MAIN] Running startup check...")
-
     active = get_active_session()
-
     if active:
-        print(f"[MAIN] Crashed session detected: {active['session_id']}")
-        print(f"[MAIN] Operator: {active['operator_id']}")
-        print(f"[MAIN] Last checkpoint: {active['last_checkpoint']}")
-        print(f"[MAIN] PERCLOS at crash: {active['perclos_checkpoint']:.2f}%")
-
-        
+        print(f"[MAIN]  Crashed session found: {active['session_id']}")
         mark_session_crashed(active["session_id"])
-
-        # Restore session state from checkpoint
         with session_lock:
-            session_state["session_id"]      = active["session_id"]
-            session_state["operator_id"]     = active["operator_id"]
-            session_state["perclos_current"] = active["perclos_checkpoint"]
-            session_state["threshold_raised"]= active["threshold_raised"]
-
-        write_audit_log("CRASH_RECOVERY", "SYSTEM",
-                        active["session_id"],
+            session_state["session_id"]       = active["session_id"]
+            session_state["operator_id"]      = active["operator_id"]
+            session_state["perclos_current"]  = active["perclos_checkpoint"]
+            session_state["threshold_raised"] = active["threshold_raised"]
+        write_audit_log("CRASH_RECOVERY", "SYSTEM", active["session_id"],
                         f"Restored PERCLOS={active['perclos_checkpoint']:.2f}%")
-
-        print("[MAIN]  Crash recovery state restored.")
+        print("[MAIN] Crash state restored.")
         state_machine.transition(SystemState.CRASH_RECOVERY)
         state_machine.transition(SystemState.MONITORING)
-        return True  # crash recovery path
+        return True
+    print("[MAIN]  Clean start.")
+    state_machine.transition(SystemState.WAITING_OPERATOR)
+    return False
 
-    else:
-        print("[MAIN] Clean start — no crashed sessions.")
-        state_machine.transition(SystemState.WAITING_OPERATOR)
-        return False  # clean start path
 
+# SHUTDOWN
 
 def shutdown(reason: str = "User requested"):
     if shutdown_event.is_set():
-        return  # already shutting down — ignore duplicate calls
-
-    print(f"\n[MAIN] Initiating shutdown: {reason}")
-    write_audit_log("SHUTDOWN", "SYSTEM", detail=reason)
-
-    # Step 1 — Signal all threads to stop
+        return
+    print(f"\n[MAIN] Shutting down: {reason}")
     shutdown_event.set()
-
-    # Step 2 — Unblock ack_event if alert thread is waiting
     ack_event.set()
-
-    # Step 3 — Put SHUTDOWN sentinel in queues
-    # Threads listening on these will see sentinel and exit loop
-    try:
-        alert_queue.put_nowait(SHUTDOWN_SENTINEL)
-    except queue.Full:
-        pass  # queue full — thread will see shutdown_event anyway
-
-    try:
-        db_queue.put_nowait(SHUTDOWN_SENTINEL)
-    except queue.Full:
-        pass
-
-    # Step 4 — Join all threads with 2 second timeout each
-    print("[MAIN] Waiting for threads to exit...")
-    for name, thread in threads.items():
-        if thread and thread.is_alive():
-            thread.join(timeout=2)
-            if thread.is_alive():
-                print(f"[MAIN]   Thread {name} did not exit cleanly — force continuing")
-            else:
-                print(f"[MAIN]  Thread {name} exited cleanly")
-
+    for q in (alert_queue, db_queue):
+        try:
+            q.put_nowait(SHUTDOWN_SENTINEL)
+        except queue.Full:
+            pass
+    for name, t in threads.items():
+        if t and t.is_alive():
+            t.join(timeout=2)
+            status = "ok" if not t.is_alive() else " force"
+            print(f"[MAIN] {status} Thread '{name}' exited")
+    cv2.destroyAllWindows()
     print("[MAIN] Shutdown complete.")
 
-
 def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully."""
-    print("\n[MAIN] Ctrl+C received.")
-    shutdown("Ctrl+C signal")
+    shutdown("Ctrl+C")
     sys.exit(0)
 
 
+def simple_db_worker():
+    """Temporary DB worker — drains db_queue so it never fills up."""
+    while not shutdown_event.is_set():
+        try:
+            msg = db_queue.get(timeout=1)
+            if msg == SHUTDOWN_SENTINEL:
+                break
+            action = msg.get("action", "")
+            if action == "CHECKPOINT":
+                update_checkpoint(
+                    msg["session_id"],
+                    msg["perclos"],
+                    msg["threshold"]
+                )
+            # INSERT_EVENT handled properly in Week 2 StorageEngine
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"[DB_WORKER] Error: {e}")
+
+
+def simple_alert_worker():
+    """Temporary alert worker — prints alerts to console."""
+    while not shutdown_event.is_set():
+        try:
+            msg = alert_queue.get(timeout=1)
+            if msg == SHUTDOWN_SENTINEL:
+                break
+            if isinstance(msg, dict):
+                level = msg.get("level", 0)
+                ear   = msg.get("ear", 0)
+                pc    = msg.get("perclos", 0)
+                print(f"\n[ALERT]  LEVEL {level} | "
+                      f"EAR={ear:.3f} | PERCLOS={pc:.1f}%")
+                print(f"[ALERT] Press SPACE to acknowledge\n")
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"[ALERT_WORKER] Error: {e}")
+
 
 def demo_login():
-   
-    print("\n" + "="*50)
-    print("  FATIGUE DETECTION SYSTEM — DEMO LOGIN")
-    print("="*50)
-    print("  Operator ID: OP001 (Demo Operator)")
-    print("  Press ENTER to login, or type 'quit' to exit")
-    print("="*50)
+    print("\n" + "="*55)
+    print("  FATIGUE DETECTION — DAY 2 TEST")
+    print("="*55)
+    print("  Operator : OP001 — Demo Operator")
+    print("  Controls : Q = quit | SPACE = acknowledge alert")
+    print("="*55)
+    input("\n  Press ENTER to start monitoring...\n")
 
-    user_input = input("\n> ").strip().lower()
-    if user_input == 'quit':
-        shutdown("User quit at login")
-        sys.exit(0)
-
-    # Open session
     session_id = open_session("OP001", demo_mode=False)
     with session_lock:
-        session_state["session_id"]   = session_id
-        session_state["operator_id"]  = "OP001"
-        session_state["operator_name"]= "Demo Operator"
-        session_state["start_time"]   = time.time()
+        session_state["session_id"]    = session_id
+        session_state["operator_id"]   = "OP001"
+        session_state["operator_name"] = "Demo Operator"
+        session_state["start_time"]    = time.time()
 
-    print(f"\n[MAIN] Session opened: {session_id}")
+    print(f"[MAIN] Session opened: {session_id}")
     state_machine.transition(SystemState.CALIBRATING)
+    # Skip calibration for Day 2 — go straight to monitoring
+    state_machine.transition(SystemState.MONITORING)
+    print("[MAIN] State: MONITORING — detection active\n")
     return session_id
 
 
+def display_loop():
+    last_print = time.time()
+    print("[MAIN] Video window open. Press Q to quit.\n")
+
+    while not shutdown_event.is_set():
+        # Get latest annotated frame
+        with frame_lock:
+            frame = frame_buffer.get("annotated") or frame_buffer.get("frame")
+
+        if frame is not None:
+            cv2.imshow("Fatigue Detection ", frame)
+
+        # Print metrics every 2 seconds
+        now = time.time()
+        if now - last_print >= 2.0:
+            with session_lock:
+                ear   = session_state.get("current_ear",    0.0)
+                mar   = session_state.get("current_mar",    0.0)
+                pitch = session_state.get("current_pitch",  0.0)
+                pc    = session_state.get("perclos_current",0.0)
+                fs    = session_state.get("fatigue_score",  0.0)
+                fps   = session_state.get("fps",            0)
+                face  = session_state.get("face_detected",  False)
+                bri   = session_state.get("brightness",     0.0)
+
+            face_icon = "Ok" if face else "Not ok"
+            print(f"[METRICS] {face_icon} Face | "
+                  f"EAR={ear:.3f} | MAR={mar:.3f} | "
+                  f"PITCH={pitch:.1f}° | PERCLOS={pc:.1f}% | "
+                  f"Score={fs:.3f} | FPS={fps} | Bright={bri:.0f}")
+            last_print = now
+
+        # Key handling
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:
+            print("[MAIN] Q pressed — shutting down.")
+            shutdown("User pressed Q")
+            break
+        elif key == ord(' '):
+            # Spacebar = acknowledge alert
+            ack_event.set()
+            print("[MAIN]  Alert acknowledged by operator.")
+            ack_event.clear()
+
+    cv2.destroyAllWindows()
+
+
+# MAIN
 
 def main():
-    print("\n" + "="*60)
+    print("\n" + "="*55)
     print("  OPERATOR FATIGUE DETECTION SYSTEM")
-    print("  Phase 1 — Laptop Prototype")
-    print("="*60)
+    print("  Phase 1 — Day 2 — Camera + MediaPipe")
+    print("="*55)
 
-    # Register Ctrl+C handler
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Step 1 — Initialize database
+    # Step 1 — Database
     print("\n[MAIN] Initializing database...")
     create_tables()
     verify_database()
-    print("[MAIN]  Database ready.")
+    print("[MAIN]  Database ready.\n")
 
-    # Step 2 — Startup crash check
-    print("\n[MAIN] Running crash recovery check...")
+    #  Crash check
     crashed = startup_check()
 
-    # Step 3 — Write system start to audit log
+    # Audit log
     write_audit_log("SYSTEM_START", "SYSTEM",
-                    detail=f"System started. Crash recovery: {crashed}")
+                    detail=f"Day 2 start. Crash recovery: {crashed}")
 
-    # Step 4 — Temporary demo login 
+    #  Login
     if not crashed:
-        session_id = demo_login()
+        demo_login()
 
-    # Step 5 — Placeholder for thread starts (Days 2-6)
-    print("\n[MAIN]   Thread start points ready.")
-    print("[MAIN] Threads will be added here in Days 2-6.")
-    print("[MAIN] Current state:", state_machine.state.name)
+    #  Start temporary worker threads
+    db_worker_thread = threading.Thread(
+        target=simple_db_worker,
+        name="TempDBWorker",
+        daemon=True
+    )
+    db_worker_thread.start()
+    threads["db_worker"] = db_worker_thread
 
-    # Step 6 — Keep main thread alive until shutdown
-    print("\n[MAIN] System running. Press Ctrl+C to exit cleanly.\n")
-    try:
-        while not shutdown_event.is_set():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
+    alert_worker_thread = threading.Thread(
+        target=simple_alert_worker,
+        name="TempAlertWorker",
+        daemon=True
+    )
+    alert_worker_thread.start()
+    threads["alert_worker"] = alert_worker_thread
 
-    shutdown("Main loop exited")
+    # Start Thread 1 (Detection)
+    print("[MAIN] Starting Thread 1 — Detection...")
+    detection_thread = DetectionThread(
+        state_machine, frame_buffer, frame_lock,
+        alert_queue, db_queue, ack_event, shutdown_event,
+        session_state, session_lock
+    )
+    detection_thread.start()
+    threads["detection"] = detection_thread
 
+    # Give Thread 1 time to initialize camera and MediaPipe
+    print("[MAIN] Waiting for camera to initialize...")
+    time.sleep(2)
+
+    #  Display loop on main thread
+    display_loop()
+
+    #  Clean shutdown
+    shutdown("Display loop ended")
 
 if __name__ == "__main__":
     main()
