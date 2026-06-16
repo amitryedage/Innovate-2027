@@ -174,7 +174,9 @@ def display_loop():
     while not shutdown_event.is_set():
         # Get latest annotated frame
         with frame_lock:
-            frame = frame_buffer.get("annotated") or frame_buffer.get("frame")
+            frame = frame_buffer.get("annotated")
+            if frame is None:
+                frame = frame_buffer.get("frame")
 
         if frame is not None:
             cv2.imshow("Fatigue Detection ", frame)
