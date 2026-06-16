@@ -202,9 +202,9 @@ def display_loop():
 
         # Key handling
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == 27:
-            print("[MAIN] Q pressed — shutting down.")
-            shutdown("User pressed Q")
+        if key == ord('q') or key == ord('Q') or key == 27:
+            print("[MAIN] Q/ESC pressed — shutting down.")
+            shutdown("User pressed Q/ESC")
             break
         elif key == ord(' '):
             # Spacebar = acknowledge alert
