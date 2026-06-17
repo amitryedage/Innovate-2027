@@ -1,4 +1,5 @@
 import sys, signal, threading, queue, time, os, cv2
+from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.state_machine  import StateMachine, SystemState
@@ -67,10 +68,15 @@ def startup_check():
     if active:
         print(f"[MAIN]  Crashed session: {active['session_id']}")
         mark_session_crashed(active["session_id"])
+        try:
+            start_ts = datetime.fromisoformat(active["start_time"]).timestamp()
+        except Exception:
+            start_ts = time.time()
         with session_lock:
             session_state.update({
                 "session_id":       active["session_id"],
                 "operator_id":      active["operator_id"],
+                "start_time":       start_ts,
                 "perclos_current":  active["perclos_checkpoint"],
                 "threshold_raised": active["threshold_raised"],
             })
@@ -238,7 +244,9 @@ def display_loop():
 
     while not shutdown_event.is_set():
         with frame_lock:
-            frame = frame_buffer.get("annotated") or frame_buffer.get("frame")
+            frame = frame_buffer.get("annotated")
+            if frame is None:
+                frame = frame_buffer.get("frame")
 
         if frame is not None:
             frame = _draw_alert_overlay(frame)

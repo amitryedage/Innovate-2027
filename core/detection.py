@@ -330,8 +330,12 @@ class DetectionThread(threading.Thread):
         perclos     = (closed / len(self.ear_deque)) * 100.0
 
         with self.session_lock:
-            baseline_ear = self.session_state.get("baseline_ear", 0.30)
-            shift_start  = self.session_state.get("start_time", time.time())
+            baseline_ear = self.session_state.get("baseline_ear")
+            if baseline_ear is None:
+                baseline_ear = 0.30
+            shift_start  = self.session_state.get("start_time")
+            if shift_start is None:
+                shift_start = time.time()
 
         baseline_perclos = max(2.0, (1.0 - baseline_ear / 0.35) * 20.0)
         fatigue_score    = (perclos - baseline_perclos) / baseline_perclos \
