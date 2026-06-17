@@ -148,4 +148,236 @@ class StorageEngine(threading.Thread):
             print(f"[T4] Events written: {self.events_written}")
 
    
+    # ACKNOWLEDGEMENT
+    # 
+
+    def _handle_acknowledge(self, msg: dict):
+        """Update event with ack time."""
+        ack_time   = msg.get("ack_time", 0.0)
+        event_data = msg.get("event", {})
+
+        # We don't have event_id here directly —
+        # find the most recent unacknowledged event for this session
+        with self.session_lock:
+            session_id = self.session_state.get("session_id")
+
+        if not session_id:
+            return
+
+        # Log ack in audit log
+        write_audit_log(
+            "EVENT_ACKNOWLEDGED", "OPERATOR",
+            session_id,
+            f"Level {event_data.get('level',0)} ack in {ack_time:.1f}s"
+        )
+
+        # Update session state ack ratio tracking
+        with self.session_lock:
+            acks = self.session_state.get("ack_times", [])
+            acks.append(ack_time)
+            self.session_state["ack_times"] = acks
+
+  
+    # CHECKPOINT
+    # Write PERCLOS state checkpoint for crash recovery
+
+    def _handle_checkpoint(self, msg: dict):
+        """Write PERCLOS state checkpoint for crash recovery."""
+        update_checkpoint(
+            session_id      = msg["session_id"],
+            perclos_value   = msg.get("perclos", 0.0),
+            threshold_raised= msg.get("threshold", 0.0),
+        )
+
+    
+    # CLIP SAVING
+    # Save 10-second video clip (5s pre + 5s post event) to disk for Level 3 fatigue events.
+
+    def _save_clip(self, pre_frames: list, event_id: str, session_id: str):
+        """
+        Save 10-second video clip (5s pre + 5s post event) to disk.
+        Only for Level 3 fatigue events.
+        """
+        if not CV2_AVAILABLE:
+            print("[T4]  OpenCV not available — clip not saved.")
+            return
+
+        # Check available storage
+        free_mb = self._get_free_storage_mb()
+        if free_mb < STORAGE_MIN_MB:
+            print(f"[T4]   Storage low ({free_mb:.0f}MB) — clip skipped.")
+            self.clips_skipped += 1
+            with self.session_lock:
+                self.session_state["storage_warning"] = True
+            return
+
+        if free_mb < STORAGE_WARN_MB:
+            print(f"[T4]  Storage critically low ({free_mb:.0f}MB)!")
+            with self.session_lock:
+                self.session_state["storage_critical"] = True
+            return
+
+        # Generate clip filename
+        timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+        filename      = f"clip_{session_id[:8]}_{timestamp_str}.mp4"
+        filepath      = os.path.join(CLIPS_DIR, filename)
+
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(
+                filepath, fourcc, CLIP_FPS,
+                (CLIP_WIDTH, CLIP_HEIGHT)
+            )
+
+            if not writer.isOpened():
+                print(f"[T4]  Could not open VideoWriter for {filepath}")
+                return
+
+            frames_written = 0
+            for frame in pre_frames:
+                if frame is not None:
+                    resized = cv2.resize(frame, (CLIP_WIDTH, CLIP_HEIGHT))
+                    writer.write(resized)
+                    frames_written += 1
+
+            writer.release()
+
+            if frames_written > 0:
+                clip_size = os.path.getsize(filepath)
+                self.clips_saved  += 1
+                self.bytes_written += clip_size
+                print(f"[T4]  Clip saved: {filename} "
+                      f"({frames_written} frames, {clip_size//1024}KB)")
+
+                # Store clip path in DB
+                try:
+                    from core.database import get_connection
+                    conn = get_connection()
+                    conn.execute("""
+                        UPDATE events SET clip_path=?
+                        WHERE session_id=? AND clip_path IS NULL
+                        ORDER BY timestamp DESC LIMIT 1
+                    """, (filepath, session_id))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"[T4] Could not update clip_path: {e}")
+            else:
+                os.remove(filepath)
+                print("[T4]   Clip had no frames — deleted.")
+
+        except Exception as e:
+            print(f"[T4] Clip save error: {e}")
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+    def _handle_save_clip(self, msg: dict):
+        """Handle explicit SAVE_CLIP message."""
+        self._save_clip(
+            pre_frames = msg.get("frames", []),
+            event_id   = msg.get("event_id", str(uuid.uuid4())),
+            session_id = msg.get("session_id", ""),
+        )
+
+    
+    # SESSION CLOSE
+    # Session close message triggers auto-delete of old clips and optional PDF report generation.
+
+    def _handle_session_close(self, msg: dict):
+        
+        session_id = msg.get("session_id")
+        if not session_id:
+            return
+
+        print(f"[T4] Closing session {session_id}...")
+
+        # Close session in DB
+        close_session(session_id)
+
+        # Run auto-delete of old clips (7-day retention)
+        print("[T4] Running auto-delete of old clips...")
+        auto_delete_old_clips()
+
+        # Update storage info in session_state
+        with self.session_lock:
+            self.session_state["storage_free_mb"] = self._get_free_storage_mb()
+
+        # Trigger PDF generation if requested
+        if msg.get("generate_report", True):
+            self._handle_generate_report({
+                "session_id": session_id,
+                "operator_name": msg.get("operator_name", "Unknown"),
+            })
+
+        print(f"[T4] Session {session_id} closed cleanly.")
+
+    
+    # REPORT GENERATION
+    # Generate PDF report for session
+
+    def _handle_generate_report(self, msg: dict):
+       
+        session_id    = msg.get("session_id")
+        operator_name = msg.get("operator_name", "Unknown")
+
+        if not session_id:
+            return
+
+        print(f"[T4] Generating PDF report for session {session_id}...")
+        try:
+            from core.report_generator import generate_report
+            pdf_path = generate_report(session_id, operator_name)
+            if pdf_path:
+                print(f"[T4]  PDF report saved: {pdf_path}")
+                with self.session_lock:
+                    self.session_state["last_report_path"] = pdf_path
+            else:
+                print("[T4]   PDF generation returned no path.")
+        except ImportError:
+            print("[T4] report_generator not yet implemented (Day 5).")
+        except Exception as e:
+            print(f"[T4]  PDF generation failed: {e}")
+            write_audit_log(
+                "PDF_FAILED", "SYSTEM", session_id,
+                f"Error: {str(e)[:100]}"
+            )
+
+    
+    # THRESHOLD CHANGE FLAG
    
+
+    def _handle_threshold_change(self, msg: dict):
+        """Log threshold change to session state for PDF report."""
+        with self.session_lock:
+            self.session_state["threshold_raised"] = msg.get("amount", 0)
+
+    
+    # STORAGE UTILITIES
+    # Returns free disk space in MB for the clips directory 
+
+    def _get_free_storage_mb(self) -> float:
+        """Returns free disk space in MB for the clips directory."""
+        try:
+            usage = shutil.disk_usage(CLIPS_DIR)
+            return usage.free / (1024 * 1024)
+        except Exception:
+            return 9999.0   # assume plenty if check fails
+
+    def get_stats(self) -> dict:
+        """Return storage stats for dashboard display."""
+        return {
+            "events_written": self.events_written,
+            "clips_saved":    self.clips_saved,
+            "clips_skipped":  self.clips_skipped,
+            "bytes_written":  self.bytes_written,
+            "free_mb":        self._get_free_storage_mb(),
+        }
+
+   
+    # CLEANUP
+    # Clean everything once done 
+
+    def _cleanup(self):
+        print(f"[T4] Final stats: events={self.events_written} "
+              f"clips={self.clips_saved} skipped={self.clips_skipped}")
+        print("[T4]  StorageEngine cleaned up.")
