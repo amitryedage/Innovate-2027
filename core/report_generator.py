@@ -310,3 +310,134 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             ))
 
         
+        # FOOTER NOTES
+        # Add a footer note about data privacy and report generation
+        story.append(Spacer(1, 0.5*cm))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                color=colors.HexColor("#CBD5E1")))
+        story.append(Spacer(1, 0.2*cm))
+        story.append(Paragraph(
+            "This report was generated automatically by the Operator Fatigue "
+            "Detection System. All data is stored locally on the edge device. "
+            "No data was transmitted externally.",
+            ParagraphStyle("Footer", parent=styles["Normal"],
+                           fontSize=7, textColor=colors.HexColor("#9CA3AF"))
+        ))
+
+        # Build PDF
+        doc.build(story)
+        size = os.path.getsize(filepath)
+        print(f"[REPORT] PDF generated: {filename} ({size:,} bytes)")
+
+        write_audit_log("REPORT_EXPORT", "SYSTEM", session_id,
+                        f"PDF: {filename}")
+        return filepath
+
+    except Exception as e:
+        import traceback
+        print(f"[REPORT]  PDF generation error: {e}")
+        traceback.print_exc()
+        return None
+
+
+
+# PERCLOS CHART
+# Visualize PERCLOS and fatigue score trends over the shift using matplotlib
+
+def _build_perclos_chart(events: list, session: dict):
+    """Build a matplotlib PERCLOS trend chart embedded in PDF."""
+    try:
+        times   = []
+        perclos = []
+        scores  = []
+
+        for ev in events:
+            if ev.get("perclos_value") is not None:
+                dt = _parse_iso(ev.get("timestamp",""))
+                if dt:
+                    times.append(dt)
+                    perclos.append(ev["perclos_value"])
+                    scores.append(ev.get("fatigue_score", 0) * 100)
+
+        if len(times) < 2:
+            return None
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 5), dpi=100)
+        fig.patch.set_facecolor("#F8FAFC")
+
+        # PERCLOS plot
+        ax1.plot(times, perclos, color="#1D4ED8", linewidth=1.5, label="PERCLOS %")
+        ax1.axhline(y=15, color="#F59E0B", linestyle="--",
+                    linewidth=1, alpha=0.7, label="L1 baseline")
+        ax1.axhline(y=25, color="#EF4444", linestyle="--",
+                    linewidth=1, alpha=0.7, label="L2 baseline")
+        ax1.set_ylabel("PERCLOS (%)", fontsize=9)
+        ax1.set_title("PERCLOS over shift", fontsize=10, fontweight="bold")
+        ax1.legend(fontsize=7, loc="upper left")
+        ax1.set_facecolor("#F8FAFC")
+        ax1.grid(True, alpha=0.3)
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+        # Fatigue score plot
+        ax2.fill_between(times, scores, alpha=0.3, color="#7C3AED")
+        ax2.plot(times, scores, color="#7C3AED", linewidth=1.5, label="Fatigue score %")
+        ax2.set_ylabel("Score above baseline (%)", fontsize=9)
+        ax2.set_title("Fatigue score (% above personal baseline)", fontsize=10)
+        ax2.set_facecolor("#F8FAFC")
+        ax2.grid(True, alpha=0.3)
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+        plt.tight_layout(pad=1.5)
+
+        # Save to BytesIO and embed in PDF
+        buf = BytesIO()
+        plt.savefig(buf, format="png", dpi=100,
+                    bbox_inches="tight", facecolor="#F8FAFC")
+        buf.seek(0)
+        plt.close(fig)
+
+        return RLImage(buf, width=16*cm, height=6*cm)
+
+    except Exception as e:
+        print(f"[REPORT] Chart error: {e}")
+        return None
+
+
+
+# HELPERS
+# Helper functions for date formatting and DB access
+
+def _get_session(session_id: str) -> dict:
+    try:
+        conn = get_connection()
+        row  = conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _parse_iso(s: str):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _fmt_dt(dt) -> str:
+    if not dt:
+        return "N/A"
+    return dt.strftime("%d %b %Y  %H:%M:%S")
+
+
+def _format_duration(start, end) -> str:
+    if not start or not end:
+        return "N/A"
+    delta = end - start
+    hours   = int(delta.total_seconds() // 3600)
+    minutes = int((delta.total_seconds() % 3600) // 60)
+    return f"{hours}h {minutes}m"
