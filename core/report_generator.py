@@ -1,0 +1,312 @@
+# report_generator.py — End-of-shift PDF report generation
+# Called by Thread 4 (StorageEngine) at session close
+# Produces a professional report for site managers
+
+import os
+import sys
+import time
+from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from config import REPORTS_DIR
+from core.database import (
+    get_session_events, get_session_summary,
+    get_connection, write_audit_log
+)
+
+# Try importing reportlab — graceful fallback if not installed
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table,
+        TableStyle, HRFlowable
+    )
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    print("[REPORT]  reportlab not installed. Run: pip install reportlab")
+
+# Try importing matplotlib for PERCLOS chart
+try:
+    import matplotlib
+    matplotlib.use("Agg")   # non-interactive backend
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from io import BytesIO
+    from reportlab.platypus import Image as RLImage
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+
+def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
+    """Generate a PDF report for the given session ID and operator name."""
+    if not REPORTLAB_AVAILABLE:
+        print("[REPORT] Cannot generate PDF — reportlab not available.")
+        return None
+
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+    # Fetch data from DB
+    events  = get_session_events(session_id)
+    summary = get_session_summary(session_id)
+    session = _get_session(session_id)
+
+    if not session:
+        print(f"[REPORT] Session {session_id} not found.")
+        return None
+
+    # Build PDF filename
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename      = f"report_{operator_name.replace(' ','_')}_{timestamp_str}.pdf"
+    filepath      = os.path.join(REPORTS_DIR, filename)
+
+    try:
+        doc = SimpleDocTemplate(
+            filepath,
+            pagesize     = A4,
+            rightMargin  = 2*cm,
+            leftMargin   = 2*cm,
+            topMargin    = 2*cm,
+            bottomMargin = 2*cm,
+        )
+
+        story = []
+        styles = getSampleStyleSheet()
+
+        # Custom styles
+        title_style = ParagraphStyle(
+            "Title",
+            parent    = styles["Title"],
+            fontSize  = 18,
+            textColor = colors.HexColor("#1E3A5F"),
+            spaceAfter= 6,
+        )
+        h1_style = ParagraphStyle(
+            "H1",
+            parent    = styles["Heading1"],
+            fontSize  = 13,
+            textColor = colors.HexColor("#1E3A5F"),
+            spaceBefore=12,
+            spaceAfter= 4,
+        )
+        h2_style = ParagraphStyle(
+            "H2",
+            parent    = styles["Heading2"],
+            fontSize  = 11,
+            textColor = colors.HexColor("#374151"),
+            spaceBefore=8,
+            spaceAfter= 3,
+        )
+        body_style = ParagraphStyle(
+            "Body",
+            parent    = styles["Normal"],
+            fontSize  = 10,
+            textColor = colors.HexColor("#374151"),
+            spaceAfter= 3,
+        )
+        warning_style = ParagraphStyle(
+            "Warning",
+            parent    = styles["Normal"],
+            fontSize  = 10,
+            textColor = colors.HexColor("#B91C1C"),
+            spaceAfter= 3,
+        )
+
+        
+        # PAGE 1 — HEADER
+        # Heder with title and horizontal rule
+        story.append(Paragraph("Operator Fatigue Detection System", title_style))
+        story.append(Paragraph("End-of-Shift Safety Report", h1_style))
+        story.append(HRFlowable(width="100%", thickness=1,
+                                color=colors.HexColor("#1E3A5F")))
+        story.append(Spacer(1, 0.3*cm))
+
+        # Session info table
+        start_dt  = _parse_iso(session.get("start_time", ""))
+        end_dt    = _parse_iso(session.get("end_time",   ""))
+        duration  = _format_duration(start_dt, end_dt)
+        machine   = session.get("machine_id", "N/A")
+        demo_mode = "YES " if session.get("demo_mode") else "No"
+        glasses   = "Yes" if session.get("glasses_mode") else "No"
+
+        info_data = [
+            ["Operator",    operator_name,      "Machine",      machine],
+            ["Shift start", _fmt_dt(start_dt),  "Shift end",    _fmt_dt(end_dt)],
+            ["Duration",    duration,            "Demo mode",    demo_mode],
+            ["Glasses mode",glasses,             "Report date",  datetime.now().strftime("%d %b %Y %H:%M")],
+        ]
+        info_table = Table(info_data, colWidths=[3.5*cm, 6*cm, 3.5*cm, 4*cm])
+        info_table.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0), (-1,-1), colors.HexColor("#F8FAFC")),
+            ("BACKGROUND",  (0,0), (0,-1), colors.HexColor("#EFF6FF")),
+            ("BACKGROUND",  (2,0), (2,-1), colors.HexColor("#EFF6FF")),
+            ("TEXTCOLOR",   (0,0), (-1,-1), colors.HexColor("#374151")),
+            ("FONTNAME",    (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE",    (0,0), (-1,-1), 9),
+            ("FONTNAME",    (0,0), (0,-1), "Helvetica-Bold"),
+            ("FONTNAME",    (2,0), (2,-1), "Helvetica-Bold"),
+            ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+            ("PADDING",     (0,0), (-1,-1), 6),
+        ]))
+        story.append(info_table)
+        story.append(Spacer(1, 0.5*cm))
+
+        
+        # SUMMARY STATISTICS
+        # Visual representation of summary statistics
+        story.append(Paragraph("Shift Summary", h1_style))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                color=colors.HexColor("#CBD5E1")))
+        story.append(Spacer(1, 0.2*cm))
+
+        # Count events by type
+        fatigue_events = [e for e in events
+                          if e["event_type"].startswith("FATIGUE")]
+        l1_count = sum(1 for e in fatigue_events if e["alert_level"] == 1)
+        l2_count = sum(1 for e in fatigue_events if e["alert_level"] == 2)
+        l3_count = sum(1 for e in fatigue_events if e["alert_level"] == 3)
+        total_f  = len(fatigue_events)
+
+        face_loss_count = sum(1 for e in events
+                              if e["event_type"] == "FACE_LOSS")
+        tamper_count    = sum(1 for e in events
+                              if e["event_type"] == "TAMPER")
+
+        # Ack ratio
+        acked   = sum(1 for e in fatigue_events if e.get("acknowledged"))
+        ack_pct = (acked / total_f * 100) if total_f > 0 else 0
+        ack_times = [e["ack_time_sec"] for e in fatigue_events
+                     if e.get("ack_time_sec")]
+        avg_ack  = sum(ack_times)/len(ack_times) if ack_times else 0
+
+        summary_data = [
+            ["Metric",                  "Count",    "Metric",           "Value"],
+            ["Total fatigue events",    str(total_f),"Ack rate",        f"{ack_pct:.0f}%"],
+            ["Level 1 (mild)",          str(l1_count),"Avg ack time",   f"{avg_ack:.1f}s"],
+            ["Level 2 (moderate)",      str(l2_count),"Face loss events",str(face_loss_count)],
+            ["Level 3 (critical)",      str(l3_count),"Tamper events",  str(tamper_count)],
+        ]
+        sum_table = Table(summary_data, colWidths=[5.5*cm, 3*cm, 5.5*cm, 3*cm])
+        sum_table.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
+            ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+            ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+            ("FONTNAME",    (0,1), (-1,-1), "Helvetica"),
+            ("FONTSIZE",    (0,0), (-1,-1), 9),
+            ("BACKGROUND",  (0,1), (-1,-1), colors.HexColor("#F8FAFC")),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),
+             [colors.HexColor("#F8FAFC"), colors.HexColor("#EFF6FF")]),
+            ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+            ("PADDING",     (0,0), (-1,-1), 6),
+            # Highlight L3 in red if any
+            *([("TEXTCOLOR", (1,4), (1,4), colors.HexColor("#B91C1C")),
+               ("FONTNAME",  (1,4), (1,4), "Helvetica-Bold")]
+              if l3_count > 0 else []),
+        ]))
+        story.append(sum_table)
+        story.append(Spacer(1, 0.4*cm))
+
+        # Safety assessment
+        if l3_count > 0:
+            story.append(Paragraph(
+                f" WARNING: {l3_count} critical fatigue event(s) detected. "
+                "Operator safety review recommended before next shift.",
+                warning_style
+            ))
+        elif l2_count > 2:
+            story.append(Paragraph(
+                f" CAUTION: {l2_count} moderate fatigue events. "
+                "Consider shorter shifts or additional breaks.",
+                warning_style
+            ))
+        else:
+            story.append(Paragraph(
+                " Shift completed without critical fatigue incidents.",
+                body_style
+            ))
+
+        
+        # PERCLOS TREND CHART
+        #If any fatigue events were recorded, generate a PERCLOS trend chart
+        if MATPLOTLIB_AVAILABLE and fatigue_events:
+            story.append(Spacer(1, 0.3*cm))
+            story.append(Paragraph("PERCLOS Trend During Shift", h1_style))
+            story.append(HRFlowable(width="100%", thickness=0.5,
+                                    color=colors.HexColor("#CBD5E1")))
+            story.append(Spacer(1, 0.2*cm))
+
+            chart = _build_perclos_chart(fatigue_events, session)
+            if chart:
+                story.append(chart)
+
+        
+        # PAGE 2 — EVENT TIMELINE
+        #Timeline of fatigue events with details
+        story.append(Spacer(1, 0.5*cm))
+        story.append(Paragraph("Event Timeline", h1_style))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                color=colors.HexColor("#CBD5E1")))
+        story.append(Spacer(1, 0.2*cm))
+
+        if fatigue_events:
+            event_data = [["Time", "Type", "EAR", "PERCLOS", "Score", "Ack", "Ack Time"]]
+            for ev in fatigue_events[:50]:   # max 50 events on report
+                ev_time  = _parse_iso(ev.get("timestamp",""))
+                ev_label = {1:"L1 Mild", 2:"L2 Mod", 3:"L3 CRIT"}.get(
+                    ev.get("alert_level",0), "L?")
+                ack_str  = "✓" if ev.get("acknowledged") else "✗"
+                ack_t    = f"{ev['ack_time_sec']:.1f}s" \
+                           if ev.get("ack_time_sec") else "—"
+                event_data.append([
+                    ev_time.strftime("%H:%M:%S") if ev_time else "?",
+                    ev_label,
+                    f"{ev.get('ear_value',0):.3f}" if ev.get('ear_value') else "—",
+                    f"{ev.get('perclos_value',0):.1f}%" if ev.get('perclos_value') else "—",
+                    f"{ev.get('fatigue_score',0):.3f}" if ev.get('fatigue_score') else "—",
+                    ack_str,
+                    ack_t,
+                ])
+
+            ev_table = Table(event_data,
+                             colWidths=[2.2*cm,2.2*cm,1.8*cm,2.2*cm,2*cm,1.2*cm,2*cm])
+            ev_style = [
+                ("BACKGROUND", (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
+                ("TEXTCOLOR",  (0,0), (-1,0),  colors.white),
+                ("FONTNAME",   (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTNAME",   (0,1), (-1,-1), "Helvetica"),
+                ("FONTSIZE",   (0,0), (-1,-1), 8),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),
+                 [colors.HexColor("#F8FAFC"), colors.HexColor("#EFF6FF")]),
+                ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#CBD5E1")),
+                ("PADDING",    (0,0), (-1,-1), 4),
+                ("ALIGN",      (2,0), (-1,-1), "CENTER"),
+            ]
+            # Highlight L3 rows in red
+            for i, ev in enumerate(fatigue_events[:50], start=1):
+                if ev.get("alert_level") == 3:
+                    ev_style.append(
+                        ("TEXTCOLOR", (0,i), (-1,i), colors.HexColor("#B91C1C"))
+                    )
+                    ev_style.append(
+                        ("FONTNAME",  (0,i), (-1,i), "Helvetica-Bold")
+                    )
+            ev_table.setStyle(TableStyle(ev_style))
+            story.append(ev_table)
+
+            if len(fatigue_events) > 50:
+                story.append(Paragraph(
+                    f"  ... {len(fatigue_events)-50} more events not shown.",
+                    body_style
+                ))
+        else:
+            story.append(Paragraph(
+                "No fatigue events recorded during this shift.", body_style
+            ))
+
+        
