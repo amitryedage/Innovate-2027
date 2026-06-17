@@ -289,4 +289,53 @@ class DashboardWindow(QMainWindow):
            self.stack.currentIndex() == 0:
             self.stack.setCurrentIndex(1)
 
-   
+    def _display_frame(self, frame: np.ndarray):
+        """Convert OpenCV BGR frame to QPixmap and show it."""
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            scaled = pixmap.scaled(
+                self.video_label.width(), self.video_label.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.video_label.setPixmap(scaled)
+        except Exception as e:
+            print(f"[UI] Frame display error: {e}")
+
+    
+    # EVENT HANDLERS
+    # Handle signals from UI widgets, emit signals to main.py via callbacks, etc.
+
+    def _handle_login(self, operator_id: str, demo_mode: bool):
+        """Called when LoginScreen emits login_requested."""
+        print(f"[UI] Login requested: {operator_id} demo={demo_mode}")
+        self.stack.setCurrentIndex(1)   # switch to monitor screen
+        if self.on_login:
+            self.on_login(operator_id, demo_mode)
+
+    def _on_ack(self):
+        self.ack_event.set()
+        print("[UI] ✅ Acknowledged via spacebar")
+        QTimer.singleShot(100, self.ack_event.clear)
+
+    def _toggle_demo(self):
+        with self.session_lock:
+            dm = not self.session_state.get("demo_mode", False)
+            self.session_state["demo_mode"] = dm
+        print(f"[UI] Demo mode: {'ON' if dm else 'OFF'}")
+
+    def _on_end_shift(self):
+        print("[UI] End shift requested")
+        self.close()
+
+    def set_calibration_manager(self, manager):
+        """Allow main.py to attach the live CalibrationManager for progress polling."""
+        self._calibration_manager = manager
+
+    def closeEvent(self, event):
+        print("[UI] Window closing — triggering shutdown")
+        if self.on_shutdown:
+            self.on_shutdown("UI window closed")
+        event.accept()
