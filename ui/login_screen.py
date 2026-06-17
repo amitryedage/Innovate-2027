@@ -110,3 +110,20 @@ class LoginScreen(QWidget):
         self.login_btn.clicked.connect(self._on_login)
         card_layout.addWidget(self.login_btn)
 
+        # Footer
+        footer = QLabel("Fully offline · No internet required · Privacy by design")
+        footer.setStyleSheet("color:#64748B; font-size:9px; "
+                             "background:transparent; border:none;")
+        footer.setAlignment(Qt.AlignCenter)
+        card_layout.addSpacing(8)
+        card_layout.addWidget(footer)
+
+        outer.addWidget(card, alignment=Qt.AlignCenter)
+
+        # Enter key triggers login
+        self.operator_input.returnPressed.connect(self._on_login)
+
+    def _on_login(self):
+        operator_id = self.operator_input.text().strip() or "OP001"
+        demo_mode   = self.demo_checkbox.isChecked()
+        self.login_requested.emit(operator_id, demo_mode)
