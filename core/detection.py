@@ -27,6 +27,7 @@ from config import (
     FACE_LOSS_LOG_SEC, FACE_LOSS_ALERT_SEC,
     CHECKPOINT_INTERVAL_SEC,
     DEMO_L1_THRESH,
+    CLIP_WIDTH, CLIP_HEIGHT,
 )
 from core.state_machine import StateMachine, SystemState
 
@@ -182,8 +183,9 @@ class DetectionThread(threading.Thread):
         # Preprocess
         processed = self._preprocess(frame)
 
-        # Save to clip buffer
-        self.clip_buffer.append(frame.copy())
+        # Save to clip buffer (resized to save memory)
+        clip_frame = cv2.resize(frame, (CLIP_WIDTH, CLIP_HEIGHT))
+        self.clip_buffer.append(clip_frame)
 
         # Write to frame_buffer for UI
         with self.frame_lock:

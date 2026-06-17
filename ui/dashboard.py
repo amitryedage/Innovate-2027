@@ -294,7 +294,7 @@ class DashboardWindow(QMainWindow):
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
-            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
             pixmap = QPixmap.fromImage(qimg)
             scaled = pixmap.scaled(
                 self.video_label.width(), self.video_label.height(),

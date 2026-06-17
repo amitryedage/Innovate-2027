@@ -132,7 +132,7 @@ class StateMachine:
         old_state = self._state
         self._state = new_state
         self._history.append(new_state)
-        print(f"[STATE] {old_state.name} → {new_state.name}")
+        print(f"[STATE] {old_state.name} -> {new_state.name}")
         return True
 
     def can_transition(self, new_state: SystemState) -> bool:
@@ -206,7 +206,7 @@ if __name__ == "__main__":
         try:
             sm._state = from_s
             sm.transition(to_s)
-            print(f"   {from_s.name} → {to_s.name}")
+            print(f"   {from_s.name} -> {to_s.name}")
             tests_pass += 1
         except InvalidTransitionError as e:
             print(f"   FAILED: {e}")
@@ -217,10 +217,10 @@ if __name__ == "__main__":
         try:
             sm._state = from_s
             sm.transition(to_s)
-            print(f"  Should have FAILED: {from_s.name} → {to_s.name}")
+            print(f"  Should have FAILED: {from_s.name} -> {to_s.name}")
             tests_fail += 1
         except InvalidTransitionError:
-            print(f" Correctly blocked: {from_s.name} → {to_s.name}")
+            print(f" Correctly blocked: {from_s.name} -> {to_s.name}")
             tests_pass += 1
 
     print("\nValid transitions:")

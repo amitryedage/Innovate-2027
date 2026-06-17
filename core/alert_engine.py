@@ -202,7 +202,7 @@ class AlertEngine(threading.Thread):
         if next_level > 3:
             next_level = 3   # already at max — keep firing L3
 
-        print(f"[T3] ↑ Escalating L{current_level} → L{next_level}")
+        print(f"[T3] ^ Escalating L{current_level} -> L{next_level}")
 
         escalated_event = dict(event)
         escalated_event["level"]      = next_level
