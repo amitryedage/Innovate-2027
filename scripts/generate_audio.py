@@ -60,6 +60,77 @@ AUDIO_SCRIPTS = {
 }
 
 # Simple for the testing purpose, we will generate a simple beep sound programmatically for level 1 alert instead of using gTTS. This ensures we have a consistent alert sound without relying on text-to-speech for the basic alert.
+def generate_beep(filepath: str):
+    try:
+        import numpy as np
+
+        # Try pydub first
+        try:
+            from pydub import AudioSegment
+            from pydub.generators import Sine
+            beep = Sine(880).to_audio_segment(duration=600)   # 600ms beep
+            beep = beep + 3   # slight volume boost
+            beep.export(filepath, format="mp3")
+            return True
+        except ImportError:
+            pass
+
+        # Fallback: write WAV manually then try to convert
+        import wave, struct
+        sample_rate = 44100
+        duration    = 0.6
+        frequency   = 880.0
+        amplitude   = 0.4
+
+        frames = []
+        for i in range(int(sample_rate * duration)):
+            t   = float(i) / sample_rate
+            val = amplitude * np.sin(2.0 * np.pi * frequency * t)
+            frames.append(struct.pack('<h', int(val * 32767)))
+
+        wav_path = filepath.replace('.mp3', '.wav')
+        with wave.open(wav_path, 'w') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(b''.join(frames))
+
+        # Try converting WAV to MP3 via pydub
+        try:
+            from pydub import AudioSegment
+            sound = AudioSegment.from_wav(wav_path)
+            sound.export(filepath, format="mp3")
+            os.remove(wav_path)
+            return True
+        except Exception:
+            # Keep as WAV — rename to mp3 (pygame can play WAV too)
+            os.rename(wav_path, filepath)
+            return True
+
+    except Exception as e:
+        print(f"    Could not generate beep: {e}")
+        # Create a 1-byte placeholder so file exists
+        with open(filepath, 'wb') as f:
+            f.write(b'\x00' * 100)
+        return False
+
+
+def generate_voice(filepath: str, text: str, lang: str) -> bool:
+    """
+    Generate voice audio using gTTS.
+    Returns True on success, False on failure.
+    """
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang=lang, slow=False)
+        tts.save(filepath)
+        return True
+    except ImportError:
+        print("   gTTS not installed. Run: pip install gTTS")
+        return False
+    except Exception as e:
+        print(f"   gTTS error: {e}")
+        return False
 
 # Main function to generate all audio files(Entry point)
 
