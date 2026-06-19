@@ -237,3 +237,60 @@ class ScenarioResult:
     seed: int
 
 
+def build_timeline(segments: list, baseline_ear: float,
+                   noise: NoiseProfile, seed: int) -> ScenarioResult:
+    """
+    Expands a list of Segment specs into a full frame-by-frame timeline.
+    Deterministic given the same seed — reruns are reproducible for debugging.
+    """
+    rng = random.Random(seed)
+    all_frames = []
+
+    cursor_ear = baseline_ear   # tracks "current" EAR across segments
+                                # so drowsy_buildup/recovery chain smoothly
+
+    for seg in segments:
+        gen = SEGMENT_GENERATORS[seg.type]
+
+        if seg.type == SegmentType.ALERT:
+            frames = gen(seg.duration_sec, baseline_ear, rng, noise)
+            cursor_ear = baseline_ear
+
+        elif seg.type == SegmentType.DROWSY_BUILDUP:
+            target = seg.extra.get("target_ear", 0.16)
+            frames = gen(seg.duration_sec, cursor_ear, target, rng, noise)
+            cursor_ear = target
+
+        elif seg.type == SegmentType.RECOVERY:
+            frames = gen(seg.duration_sec, cursor_ear, baseline_ear, rng, noise)
+            cursor_ear = baseline_ear
+
+        elif seg.type == SegmentType.MICROSLEEP:
+            frames = gen(seg.duration_sec, rng, noise)
+            cursor_ear = 0.08
+
+        elif seg.type == SegmentType.YAWN:
+            frames = gen(seg.duration_sec, rng, noise)
+
+        elif seg.type == SegmentType.HEAD_DROOP:
+            frames = gen(seg.duration_sec, rng, noise)
+
+        elif seg.type == SegmentType.BLINK_BURST:
+            frames = gen(seg.duration_sec, baseline_ear, rng, noise)
+
+        elif seg.type == SegmentType.FACE_LOST:
+            frames = gen(seg.duration_sec)
+
+        elif seg.type == SegmentType.GLASSES_GLARE:
+            frames = gen(seg.duration_sec, rng, noise)
+
+        else:
+            raise ValueError(f"Unknown segment type: {seg.type}")
+
+        # Layer cab vibration on top (skip for face-lost — no signal anyway)
+        if seg.type != SegmentType.FACE_LOST:
+            frames = apply_vibration(frames, noise)
+
+        all_frames.extend(frames)
+
+    return ScenarioResult(frames=all_frames, segments=segments, seed=seed)
