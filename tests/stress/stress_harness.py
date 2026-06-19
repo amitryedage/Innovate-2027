@@ -240,4 +240,18 @@ class StressHarness:
                 time.sleep((1.0 / FPS_TARGET) / speed_multiplier)
 
     
- 
+    # ASSERTIONS / REPORTING
+    # Report generation is tested end-to-end in test_report_generation.py, so here we just return a summary of what happened for test assertions. We do NOT
+    # assert on exact alert timings or fatigue scores, since those are already tested in isolation in test_ear.py and test_alert_engine.py. Instead we assert on the overall pattern of alert levels, number of alerts, and final PERCLOS/score at the end of the scenario.
+
+    def get_summary(self) -> dict:
+        levels_fired = [e["level"] for e in self.event_log if e.get("level")]
+        return {
+            "frames_processed": self.frames_processed,
+            "alerts_fired":      len(levels_fired),
+            "max_level_fired":   max(levels_fired) if levels_fired else 0,
+            "event_log":         self.event_log,
+            "final_perclos":     self.session_state.get("perclos_current", 0),
+            "final_score":       self.session_state.get("fatigue_score", 0),
+            "threshold_raised":  self.session_state.get("threshold_raised", 0),
+        }
