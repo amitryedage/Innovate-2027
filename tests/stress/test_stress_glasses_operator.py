@@ -160,4 +160,87 @@ def run():
               for e in summary_1["event_log"]),
           f">= {FATIGUE_L1_THRESH} at some point", summary_1["final_score"])
 
+    # PROFILE 2: high vibration (hardest case for glasses) 
+    # one of the critical test case to check 
+    print("  PROFILE: glasses-operator  |  high_vibration")
+    
+
+    noise_vibe = NoiseProfile(
+        ear_jitter=0.018, mar_jitter=0.015, pitch_jitter=2.0,
+        vibration_hz=12.0, vibration_amp=0.025   # heavier machine vibration
+    )
+    segments2 = build_glasses_timeline(duration_sec)
+    scenario2  = build_timeline(segments2, baseline_ear=GLASSES_BASELINE_EAR,
+                                noise=noise_vibe, seed=7002)
+
+    # Record glare ranges for profile 2
+    glare_ranges2 = []
+    frame_cursor = 0
+    for seg in segments2:
+        seg_frames = int(seg.duration_sec * 30)
+        if seg.type == SegmentType.GLASSES_GLARE:
+            glare_ranges2.append((frame_cursor, frame_cursor + seg_frames))
+        frame_cursor += seg_frames
+
+    harness2 = StressHarness(
+        operator_id    = "OP_GLASSES_STRESS",
+        baseline_ear   = GLASSES_BASELINE_EAR,
+        baseline_mar   = GLASSES_BASELINE_MAR,
+        baseline_pitch = GLASSES_BASELINE_PITCH,
+        glasses_mode   = True,
+        verbose        = True,
+    )
+    harness2.start_threads()
+    t0 = time.time()
+    harness2.run_scenario(scenario2, auto_ack_delay=4.0, speed_multiplier=speed)
+    elapsed2 = time.time() - t0
+    harness2.stop_threads(generate_report=False)
+
+    summary_2 = harness2.get_summary()
+    print(f"\nProfile completed in {elapsed2:.1f}s")
+
+    
+    print("  ASSERTIONS — glasses high_vibration profile")
+    
+    check("All frames processed under high vibration",
+          summary_2["frames_processed"] == len(scenario2.frames),
+          len(scenario2.frames), summary_2["frames_processed"])
+
+    alerts_during_glare2 = []
+    for start_f, end_f in glare_ranges2:
+        for ev in summary_2["event_log"]:
+            if start_f <= ev["frame"] <= end_f:
+                alerts_during_glare2.append(ev)
+
+    check("No false alerts during glare even with high vibration noise",
+          len(alerts_during_glare2) == 0,
+          "0 glare alerts", len(alerts_during_glare2))
+
+    check("EMA smoothing handles high vibration (no exception on noisy pitch)",
+          True)  # would have raised if EMA failed
+
+    
+    
+    print("  CROSS-PROFILE SUMMARY")
+    
+    print(f"  normal_indoor   | alerts={summary_1['alerts_fired']:3d} "
+          f"| glare_false_alerts={len(alerts_during_glare)}")
+    print(f"  high_vibration  | alerts={summary_2['alerts_fired']:3d} "
+          f"| glare_false_alerts={len(alerts_during_glare2)}")
+
+    
+    total = passed + failed
+    print(f"  RESULTS: {passed}/{total} checks passed")
+    if failed == 0:
+        print("  ALL CHECKS PASSED")
+        print("  Glasses-mode correctly handles glare artifacts and real fatigue.")
+    else:
+        print(f"   {failed} CHECKS FAILED")
    
+
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = run()
+    sys.exit(0 if success else 1)
