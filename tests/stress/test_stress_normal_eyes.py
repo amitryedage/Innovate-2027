@@ -250,3 +250,90 @@ def run_profile(noise_name: str, duration_sec: int, seed: int) -> dict:
 
 
 
+# MAIN
+# Entry point for the program 
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fast", action="store_true",
+                       help="Run 60s per profile instead of 30min (fast smoke test)")
+    args = parser.parse_args()
+
+    duration_sec = 60 if args.fast else 30 * 60
+    mode_label   = "QUICK (60s/profile)" if args.fast else "FULL (30min/profile)"
+
+    print("=" * 60)
+    print(f"  STRESS TEST -- Normal Eyes Operator Profile")
+    print(f"  Mode: {mode_label}")
+    print(f"  Profiles: {list(NOISE_PROFILES.keys())}")
+    print("=" * 60)
+
+    create_tables()
+
+    all_results = []
+    for i, noise_name in enumerate(NOISE_PROFILES.keys()):
+        result = run_profile(noise_name, duration_sec, seed=100 + i)
+        all_results.append(result)
+
+        print(f"\n  Results for {noise_name}:")
+        print(f"    Frames processed:   {result['frames_processed']}")
+        print(f"    Wall time:          {result['wall_time_sec']}s")
+        print(f"    Max fatigue score:  {result['max_fatigue_score']}")
+        print(f"    Alert events seen:  {result['alert_events_seen']}")
+        print(f"    Exceptions:         {len(result['exceptions'])}")
+
+        # Assertions per profile
+        check(f"[{noise_name}] No exceptions during processing",
+              len(result["exceptions"]) == 0,
+              "0 exceptions", f"{len(result['exceptions'])} exceptions: "
+              f"{result['exceptions'][:3]}")
+
+        check(f"[{noise_name}] Correct frame count processed",
+              result["frames_processed"] == duration_sec * FPS_TARGET,
+              duration_sec * FPS_TARGET, result["frames_processed"])
+
+        check(f"[{noise_name}] Fatigue score reached L1 threshold "
+              f"({FATIGUE_L1_THRESH}) at least once",
+              result["max_fatigue_score"] >= FATIGUE_L1_THRESH,
+              f">= {FATIGUE_L1_THRESH}", result["max_fatigue_score"])
+
+        check(f"[{noise_name}] At least one alert event was queued",
+              result["alert_events_seen"] >= 1,
+              ">= 1", result["alert_events_seen"])
+
+    # Cross-profile comparison.
+    # Multiprofile comparsion
+    print(f"\n{'='*60}")
+    print("  CROSS-PROFILE SUMMARY")
+    print(f"{'='*60}")
+    for r in all_results:
+        print(f"  {r['noise_profile']:18s} | "
+              f"max_score={r['max_fatigue_score']:.3f} | "
+              f"alerts={r['alert_events_seen']:3d} | "
+              f"exceptions={len(r['exceptions'])}")
+
+    # Sanity: darker/noisier profiles should not silently produce zero signal
+    dark_result = next(r for r in all_results if r["noise_profile"] == "very_dark")
+    check("very_dark profile still reaches meaningful fatigue scores "
+          "(noise doesn't mask real signal)",
+          dark_result["max_fatigue_score"] >= FATIGUE_L1_THRESH,
+          f">= {FATIGUE_L1_THRESH}", dark_result["max_fatigue_score"])
+
+    
+    # SUMMARY
+    # over all summary of the test cases 
+   
+    total = passed + failed
+    print(f"  RESULTS: {passed}/{total} checks passed")
+    if failed == 0:
+        print("  ALL STRESS CHECKS PASSED")
+        print("  Normal-eyes profile survives all lighting/noise conditions.")
+    else:
+        print(f"  {failed} CHECKS FAILED -- investigate before Week 2")
+  
+
+    sys.exit(0 if failed == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()
