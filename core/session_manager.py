@@ -261,4 +261,85 @@ class SessionManager:
               f"(EAR={baseline_ear:.3f}) — skipping calibration")
         return False
 
+    def _load_stored_baseline(self, operator: dict):
+        """Push stored operator baseline into session_state."""
+        with self.session_lock:
+            self.session_state.update({
+                "baseline_ear":    operator.get("baseline_ear",   0.30),
+                "baseline_mar":    operator.get("baseline_mar",   0.10),
+                "baseline_pitch":  operator.get("baseline_pitch", 2.0),
+                "glasses_mode":    bool(operator.get("glasses_mode", False)),
+                "drowsy_at_start": False,
+            })
+        print(f"[MGR] Baseline loaded: "
+              f"EAR={operator.get('baseline_ear', 0.30):.3f} "
+              f"MAR={operator.get('baseline_mar', 0.10):.3f} "
+              f"glasses={bool(operator.get('glasses_mode', False))}")
+
+    def _start_calibration(self, operator_id: str, demo_mode: bool):
+        """Launch calibration in a daemon thread."""
+        self._cal_manager = CalibrationManager(
+            self.session_state, self.session_lock, self.shutdown_event
+        )
+        self._cal_thread = threading.Thread(
+            target  = self._run_calibration,
+            args    = (operator_id, demo_mode),
+            name    = f"CalibThread-{operator_id}",
+            daemon  = True,
+        )
+        self._cal_thread.start()
+        print(f"[MGR] Calibration thread started for {operator_id}")
+
+    def _run_calibration(self, operator_id: str, demo_mode: bool):
+        """
+        Runs in daemon thread. On success, transitions to MONITORING.
+        On failure, uses sensible defaults and continues monitoring
+        (system fails SAFE — better to monitor with defaults than to
+        block the operator from starting work).
+        """
+        try:
+            result = self._cal_manager.run(
+                operator_id = operator_id,
+                demo_mode   = demo_mode,
+            )
+            print(f"\n[MGR]  Calibration complete for {operator_id}:")
+            print(f"       EAR={result['baseline_ear']:.3f}  "
+                  f"MAR={result['baseline_mar']:.3f}  "
+                  f"PITCH={result['baseline_pitch']:.1f}°  "
+                  f"glasses={result['glasses_mode']}")
+
+            if result.get("drowsy_at_start"):
+                print(f"[MGR]   Operator appears fatigued at shift start — "
+                      f"baseline blended with population average")
+
+        except CalibrationError as e:
+            print(f"\n[MGR]   Calibration failed: {e}")
+            print("[MGR] Using population defaults — monitoring continues")
+            write_audit_log("CALIBRATION_FAILED", operator_id,
+                            self.session_state.get("session_id"),
+                            str(e)[:120])
+
+        finally:
+            # Always transition to MONITORING regardless of calibration outcome
+            if self.sm.state == SystemState.CALIBRATING:
+                self.sm.transition(SystemState.MONITORING)
+                print("[MGR]  MONITORING active")
+
+   
+    # CALIBRATION PROGRESS 
+    
+
+    def get_calibration_progress(self) -> dict:
+        """Returns current calibration progress for the UI progress bar."""
+        if self._cal_manager:
+            return self._cal_manager.get_progress()
+        return {
+            "progress_pct":   0.0,
+            "face_pct":       0.0,
+            "status_message": "Waiting...",
+            "is_running":     False,
+            "sample_count":   0,
+        }
+
   
+   
