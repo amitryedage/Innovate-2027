@@ -27,7 +27,6 @@ from config import (
     FACE_LOSS_LOG_SEC, FACE_LOSS_ALERT_SEC,
     CHECKPOINT_INTERVAL_SEC,
     DEMO_L1_THRESH,
-    CLIP_WIDTH, CLIP_HEIGHT,
 )
 from core.state_machine import StateMachine, SystemState
 
@@ -38,6 +37,7 @@ MODEL_PATH = os.path.join(
 
 
 # 3D FACE MODEL for head pose solvePnP
+
 FACE_3D_MODEL = np.array([
     [0.0,    0.0,    0.0   ],
     [0.0,   -330.0, -65.0  ],
@@ -48,11 +48,15 @@ FACE_3D_MODEL = np.array([
 ], dtype=np.float64)
 
 # Landmark indices for head pose (nose, chin, left eye, right eye, mouth corners)
-HEAD_POSE_INDICES = [1, 152, 33, 263, 61, 291] #As per the facemesh model need to adjust if model is changed 
+HEAD_POSE_INDICES = [1, 152, 33, 263, 61, 291]
 
 
 class DetectionThread(threading.Thread):
-    
+    """
+    Thread 1 — Full detection pipeline.
+    Camera → preprocess → FaceLandmarker → EAR/MAR/pitch
+    → EMA → PERCLOS → alert decision → queues
+    """
 
     def __init__(self, state_machine, frame_buffer, frame_lock,
                  alert_queue, db_queue, ack_event, shutdown_event,
@@ -108,7 +112,7 @@ class DetectionThread(threading.Thread):
 
     
     # MAIN RUN LOOP
-    #Entry point for the detection thread. Initializes camera and landmarker, then enters main loop to process frames until shutdown.
+    # Entry point 
     def run(self):
         print("[T1] Starting...")
         if not self._init_camera():
@@ -117,20 +121,20 @@ class DetectionThread(threading.Thread):
         if not self._init_landmarker():
             print("[T1]  FaceLandmarker failed. Exiting.")
             return
-        print("[T1] Ready. Detection loop running.")
+        print("[T1]  Ready. Detection loop running.")
         try:
             while not self.shutdown_event.is_set():
                 self._process_frame()
         except Exception as e:
             import traceback
-            print(f"[T1] Error: {e}")
+            print(f"[T1]  Error: {e}")
             traceback.print_exc()
         finally:
             self._cleanup()
 
     
-    # INIT (Camera, Landmarker)
-
+    # INIT
+    
     def _init_camera(self) -> bool:
         print(f"[T1] Opening camera {CAMERA_INDEX}...")
         self.cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -144,13 +148,19 @@ class DetectionThread(threading.Thread):
             return False
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"[T1] Camera {w}x{h} @ {FPS_TARGET}fps")
+        print(f"[T1]  Camera {w}x{h} @ {FPS_TARGET}fps")
         return True
 
     def _init_landmarker(self) -> bool:
+        """
+        Initialize MediaPipe FaceLandmarker using new Tasks API.
+        Requires face_landmarker.task model file in assets/ folder.
+        Download it once by running:
+            python scripts/download_model.py
+        """
         model_path = os.path.abspath(MODEL_PATH)
         if not os.path.exists(model_path):
-            print(f"[T1] Model file not found: {model_path}")
+            print(f"[T1]  Model file not found: {model_path}")
             print("[T1]    Run:  python scripts/download_model.py")
             return False
 
@@ -168,12 +178,12 @@ class DetectionThread(threading.Thread):
             print("[T1]  FaceLandmarker loaded.")
             return True
         except Exception as e:
-            print(f"[T1]  FaceLandmarker init error: {e}")
+            print(f"[T1] FaceLandmarker init error: {e}")
             return False
 
     
-    # FRAME PROCESSING(Preprocess → Landmarker → Features → EMA → PERCLOS → Alert Decision)
-   
+    # FRAME PROCESSING
+    # Process each frame one by one 
     def _process_frame(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
@@ -183,9 +193,8 @@ class DetectionThread(threading.Thread):
         # Preprocess
         processed = self._preprocess(frame)
 
-        # Save to clip buffer (resized to save memory)
-        clip_frame = cv2.resize(frame, (CLIP_WIDTH, CLIP_HEIGHT))
-        self.clip_buffer.append(clip_frame)
+        # Save to clip buffer
+        self.clip_buffer.append(frame.copy())
 
         # Write to frame_buffer for UI
         with self.frame_lock:
@@ -255,8 +264,8 @@ class DetectionThread(threading.Thread):
         self._update_fps()
 
     
-    # PREPROCESSING (Resize, CLAHE for low light, brightness tracking,need to make the improvement for real world env)
-    
+    # PREPROCESSING
+    # preprocess every frame 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
         gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -274,9 +283,8 @@ class DetectionThread(threading.Thread):
 
    
     # FEATURE EXTRACTION
-    
     def _calculate_ear(self, landmarks, w: int, h: int) -> float:
-        """Eye Aspect Ratio from 6 landmarks per eye."""
+        """Eye Aspect Ratio from 6 landmarks per eye.""" # Facemesh algorithum
         def eye_ear(indices):
             pts = [(landmarks[i].x * w, landmarks[i].y * h) for i in indices]
             A = dist.euclidean(pts[1], pts[5])
@@ -320,10 +328,30 @@ class DetectionThread(threading.Thread):
         return abs(angles[0] * 360)
 
    
-    # PERCLOS ENGINE(Calculates PERCLOS fatigue score based on rolling window of EAR values.)
+    # PERCLOS ENGINE
+    # PERCLOS is the percentage of time eyes are closed over a rolling window.
+    # Glasses-mode glare frames are filtered out so they don't count as closed.
+
     def _update_perclos(self, glasses_mode: bool) -> float:
         ear_threshold = 0.22 if not glasses_mode else 0.18
-        self.ear_deque.append(self.smooth_ear)
+
+        # Glasses-mode glare gate:
+        # If EAR drops below threshold BUT MAR and pitch are resting,
+        # this is almost certainly a lens-reflection artifact, not a
+        # real eye-closure event. Do NOT count this frame as closed.
+        # Glare signature: EAR low + MAR < 0.35 (not yawning) + pitch < 8deg
+        if glasses_mode and self.smooth_ear < ear_threshold:
+            is_glare = (self.smooth_mar < 0.35 and self.smooth_pitch < 8.0)
+            # Use baseline_ear as the appended value so glare frames are
+            # treated as "eyes open" in the PERCLOS window
+            if is_glare:
+                with self.session_lock:
+                    baseline = self.session_state.get("baseline_ear", 0.18)
+                self.ear_deque.append(baseline)
+            else:
+                self.ear_deque.append(self.smooth_ear)
+        else:
+            self.ear_deque.append(self.smooth_ear)
 
         if len(self.ear_deque) < 30:
             return 0.0
@@ -332,12 +360,8 @@ class DetectionThread(threading.Thread):
         perclos     = (closed / len(self.ear_deque)) * 100.0
 
         with self.session_lock:
-            baseline_ear = self.session_state.get("baseline_ear")
-            if baseline_ear is None:
-                baseline_ear = 0.30
-            shift_start  = self.session_state.get("start_time")
-            if shift_start is None:
-                shift_start = time.time()
+            baseline_ear = self.session_state.get("baseline_ear", 0.30)
+            shift_start  = self.session_state.get("start_time", time.time())
 
         baseline_perclos = max(2.0, (1.0 - baseline_ear / 0.35) * 20.0)
         fatigue_score    = (perclos - baseline_perclos) / baseline_perclos \
@@ -355,10 +379,9 @@ class DetectionThread(threading.Thread):
 
         return fatigue_score
 
-   
-    # ALERT DECISION (Determines when to fire L1/L2/L3 alerts based on fatigue score and feature thresholds.
-    # Uses a confirm_counter to require DEBOUNCE_FRAMES consecutive frames before escalating alert)
-
+    
+    # ALERT DECISION
+    # Alert levels are determined by PERCLOS, EAR, MAR, and pitch.
     def _alert_decision(self, fatigue_score: float,
                         ear: float, mar: float, pitch: float):
         demo = self.session_state.get("demo_mode", False)
@@ -409,14 +432,14 @@ class DetectionThread(threading.Thread):
             self.db_queue.put_nowait({"action": "INSERT_EVENT", "data": event})
             self.current_alert_level = level
             self.confirm_counter     = 0
-            print(f"[T1]  ALERT L{level} | "
+            print(f"[T1] 🚨 ALERT L{level} | "
                   f"EAR={ear:.3f} PERCLOS={fatigue_score:.2f}")
         except Exception:
             pass
 
     
-    # FACE LOSS (Adjust time if required )
-   
+    # FACE LOSS
+    # Face not detected for >30s triggers CAMERA_OBSTRUCTION alert.
     def _handle_face_loss(self):
         self.face_loss_frames += 1
         elapsed = self.face_loss_frames / FPS_TARGET
@@ -432,7 +455,7 @@ class DetectionThread(threading.Thread):
             except Exception:
                 pass
             self.face_loss_alerted = True
-            print("[T1]   Camera obstruction >30s")
+            print("[T1]  Camera obstruction >30s")
 
         elif elapsed > FACE_LOSS_LOG_SEC and not self.face_loss_logged:
             try:
@@ -454,8 +477,8 @@ class DetectionThread(threading.Thread):
             self.session_state["face_detected"] = True
 
     
-    # LANDMARK DRAWING(Adjustable we can ajust if required according to camera position and angle)
-    
+    # LANDMARK DRAWING
+    # landmarks are drawn on the annotated frame for UI display, with EAR/MAR/pitch metrics overlaid.
     def _draw_landmarks(self, frame, landmarks, w: int, h: int) -> np.ndarray:
         out = frame.copy()
         # Eyes — green dots
@@ -491,8 +514,8 @@ class DetectionThread(threading.Thread):
                     (10, 154), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150,150,150), 1)
         return out
 
-  
-    # CHECKPOINT(save intermediate state to DB every 60s — useful for crash recovery and analytics)
+   
+    # CHECKPOINT
 
     def _write_checkpoint(self):
         try:
@@ -511,7 +534,7 @@ class DetectionThread(threading.Thread):
             pass
 
     
-    # FPS(Frames Per Second) tracking for now it's 30 which is good enough for the edge device
+    # FPS
     
     def _update_fps(self):
         self.frame_count += 1
@@ -521,13 +544,5 @@ class DetectionThread(threading.Thread):
             self.frame_count    = 0
             self.fps_start_time = time.time()
 
-    # ----------------------------------------------------------
-    # CLEANUP
-    # ----------------------------------------------------------
-    def _cleanup(self):
-        print("[T1] Releasing resources...")
-        if self.cap and self.cap.isOpened():
-            self.cap.release()
-        if self.landmarker:
-            self.landmarker.close()
-        print("[T1] Thread 1 cleaned up.")
+  
+   
