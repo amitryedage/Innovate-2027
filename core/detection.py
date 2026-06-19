@@ -545,4 +545,12 @@ class DetectionThread(threading.Thread):
             self.fps_start_time = time.time()
 
   
-   
+    # CLEANUP
+    # Clean up process is applied once the work is completed
+    def _cleanup(self):
+        print("[T1] Releasing resources...")
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        if self.landmarker:
+            self.landmarker.close()
+        print("[T1] Thread 1 cleaned up.")
