@@ -188,19 +188,3 @@ CALIBRATION_PROMPT_FACE_PCT = 0.60   # below this = voice prompt to look at came
 DEMO_CALIBRATION_SEC        = 10     # calibration completes in 10s in demo mode
 DEMO_L1_THRESH              = 0.05   # much tighter threshold for fast demo alerts
 
-# -------------------------------------------------------------
-# STORAGE
-# -------------------------------------------------------------
-CLIP_DURATION_PRE_SEC   = 5      # seconds before event to include in clip
-CLIP_DURATION_POST_SEC  = 5      # seconds after event to include in clip
-CLIP_WIDTH              = 640    # clip resolution width
-CLIP_HEIGHT             = 480    # clip resolution height
-CLIP_FPS                = 15     # clip frame rate (lower = smaller file)
-
-STORAGE_MIN_MB          = 500    # skip clip save if less than this free
-STORAGE_WARN_MB         = 100    # stop all clips if less than this free
-
-CLIP_RETENTION_DAYS     = 7      # auto-delete clips older than this
-EVENT_RETENTION_DAYS    = 30     # auto-delete event records older than this
-AUDIT_RETENTION_DAYS    = 90     # auto-delete audit records older than this
-
