@@ -213,8 +213,9 @@ class DashboardWindow(QMainWindow):
 
         # Update video frame
         with self.frame_lock:
-            frame = self.frame_buffer.get("annotated") or \
-                    self.frame_buffer.get("frame")
+            frame = self.frame_buffer.get("annotated")
+            if frame is None:
+                frame = self.frame_buffer.get("frame")
 
         if frame is not None:
             self._display_frame(frame)
