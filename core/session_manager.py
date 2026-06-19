@@ -342,4 +342,70 @@ class SessionManager:
         }
 
   
+    # OPERATOR REGISTRATION
+   # On board new opertator
+
+    def _ensure_operator(self, operator_id: str) -> dict:
+        """
+        Returns the operator record. Registers a new operator if
+        they don't exist yet (first RFID swipe).
+        """
+        operator = get_operator(operator_id)
+        if operator:
+            return dict(operator)
+
+        # First time this operator_id has been seen — register them
+        print(f"[MGR] New operator {operator_id} — registering...")
+        conn = get_connection()
+        try:
+            conn.execute("""
+                INSERT INTO operators
+                (operator_id, name, pin_hash, baseline_ear, baseline_mar,
+                 baseline_pitch, glasses_mode, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                operator_id,
+                f"Operator {operator_id}",
+                "0000",      # default PIN — operator should change this
+                0.0,         # no baseline yet — forces calibration
+                0.0,
+                0.0,
+                0,
+                datetime.now().isoformat(),
+            ))
+            conn.commit()
+            write_audit_log("OPERATOR_REGISTERED", operator_id,
+                            detail=f"Auto-registered on first RFID swipe")
+            #Check that oprator is vaild or invalid
+            print(f"[MGR] Operator {operator_id} registered")
+            return dict(get_operator(operator_id))
+        except Exception as e:
+            print(f"[MGR]  Failed to register operator: {e}")
+            return None
+        finally:
+            conn.close()
+
    
+    # RFID SIMULATION (Phase 1 — keyboard proxy)
+    # Phase 2 replaces this with GPIO RFID reader
+    # Just for the testing purpose need to change in the actual deployement
+
+
+    def simulate_rfid_swipe(self, operator_id: str):
+        """
+        Simulates an RFID card swipe (keyboard-triggered in Phase 1).
+        If a session is already active, ends it first (handover).
+        Phase 2: GPIO interrupt from physical RFID reader calls this.
+        """
+        with self.session_lock:
+            current_session = self.session_state.get("session_id")
+
+        if current_session:
+            print(f"\n[MGR] RFID swipe during active session — handover detected")
+            self.end_session(reason=f"Handover to {operator_id}")
+            time.sleep(0.5)   # brief pause so PDF generation starts
+
+        self.start_session(operator_id, demo_mode=False)
+
+    
+ 
