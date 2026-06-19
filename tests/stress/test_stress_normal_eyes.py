@@ -202,3 +202,51 @@ class StressHarness:
 # Profile section 
 
 
+def run_profile(noise_name: str, duration_sec: int, seed: int) -> dict:
+    print(f"\n{'='*60}")
+    print(f"  PROFILE: normal-eyes  |  noise: {noise_name}  |  "
+          f"duration: {duration_sec}s")
+    print(f"{'='*60}")
+
+    noise = NOISE_PROFILES[noise_name]
+    gen = ScenarioGenerator(
+        baseline_ear=0.30, baseline_mar=0.10, baseline_pitch=2.0,
+        noise=noise, seed=seed,
+    )
+
+    harness = StressHarness(
+        baseline_ear=0.30, baseline_mar=0.10, baseline_pitch=2.0,
+        glasses_mode=False,
+    )
+    harness.start_threads()
+
+    t0 = time.time()
+    frame_count = 0
+    for sample in gen.generate(duration_sec=duration_sec, fps=FPS_TARGET):
+        harness.feed_sample(sample)
+        frame_count += 1
+        # Let alert/storage threads breathe periodically — keeps this
+        # from being purely synchronous and closer to real timing
+        if frame_count % 500 == 0:
+            time.sleep(0.01)
+
+    wall_time = time.time() - t0
+
+    # Give AlertEngine a moment to process any queued L2/L3 ack-wait cycles
+    time.sleep(1.0)
+
+    result = {
+        "noise_profile":     noise_name,
+        "frames_processed":  frame_count,
+        "wall_time_sec":     round(wall_time, 2),
+        "max_fatigue_score": round(harness.max_fatigue_score, 3),
+        "alert_events_seen": len(harness.alert_events_seen),
+        "exceptions":         harness.exceptions,
+        "session_id":         harness.session_id,
+    }
+
+    harness.shutdown()
+    return result
+
+
+
