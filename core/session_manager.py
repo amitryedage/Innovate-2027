@@ -408,4 +408,16 @@ class SessionManager:
         self.start_session(operator_id, demo_mode=False)
 
     
- 
+    # STATUS
+    # Status of the current session
+
+    def get_status(self) -> dict:
+        with self.session_lock:
+            return {
+                "session_id":   self.session_state.get("session_id"),
+                "operator_id":  self.session_state.get("operator_id"),
+                "state":        self.sm.state.name,
+                "calibrating":  self._cal_thread is not None and
+                                self._cal_thread.is_alive(),
+                "demo_mode":    self.session_state.get("demo_mode", False),
+            }
