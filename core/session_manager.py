@@ -220,4 +220,45 @@ class SessionManager:
             self.on_session_ended_callback()
 
     
-   
+    # CALIBRATION
+    # Apply when any new oprator is on boarded 
+    
+
+    def _needs_calibration(self, operator: dict, demo_mode: bool) -> bool:
+        """
+        Returns True if this operator needs fresh calibration.
+
+        Calibration is skipped if:
+        - Operator has a stored baseline from a previous session
+        - That baseline is recent (within RECALIBRATE_AFTER_DAYS days)
+        - Not in demo mode (demo always calibrates, but only for 10s)
+
+        Calibration is forced if:
+        - Operator has never calibrated (baseline_ear == 0 or NULL)
+        - Last calibration was more than RECALIBRATE_AFTER_DAYS days ago
+        - Operator's glasses_mode changed since last calibration
+        """
+        baseline_ear = operator.get("baseline_ear") or 0.0
+        last_seen    = operator.get("last_seen")
+
+        if baseline_ear < 0.05:
+            print(f"[MGR] No stored baseline for {operator['operator_id']} "
+                  f"— calibration required")
+            return True
+
+        if last_seen:
+            try:
+                last_dt  = datetime.fromisoformat(last_seen)
+                days_ago = (datetime.now() - last_dt).days
+                if days_ago > RECALIBRATE_AFTER_DAYS:
+                    print(f"[MGR] Last calibration was {days_ago} days ago "
+                          f"(>{RECALIBRATE_AFTER_DAYS}) — recalibrating")
+                    return True
+            except Exception:
+                pass
+
+        print(f"[MGR] Using stored baseline for {operator['operator_id']} "
+              f"(EAR={baseline_ear:.3f}) — skipping calibration")
+        return False
+
+  
