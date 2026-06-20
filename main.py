@@ -237,7 +237,23 @@ def main():
     threads["alert"] = alert
     time.sleep(0.2)
 
- 
+    # Step 4 — Thread 5: PredictiveEngine 
+    print("[MAIN] Starting Thread 5 — PredictiveEngine...")
+    predictive_engine = PredictiveEngine(
+        session_state, session_lock,
+        alert_queue, db_queue,
+        shutdown_event, state_machine
+    )
+    predictive_engine.start()
+    threads["predictive"] = predictive_engine
+    time.sleep(0.1)
+
+    # Step 5 — Risk scorer not a thread, called on demand
+    risk_scorer = RiskScorer(
+        session_state, session_lock,
+        predictive_engine=predictive_engine
+    )
+    print("[MAIN] Risk scorer ready.")
 
     # Step 6 — Session manager
     session_manager = SessionManager(
