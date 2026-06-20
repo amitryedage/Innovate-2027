@@ -1,6 +1,3 @@
-# report_generator.py — End-of-shift PDF report generation
-# Called by Thread 4 (StorageEngine) at session close
-# Produces a professional report for site managers
 
 import os
 import sys
@@ -14,6 +11,44 @@ from core.database import (
     get_session_events, get_session_summary,
     get_connection, write_audit_log
 )
+
+
+def _get_risk_score(session_id: str) -> dict:
+    try:
+        from core.risk_scorer import RiskScorer
+        import threading
+        # Fetch actual session start_time from DB so shift_time component scores correctly
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT start_time FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        conn.close()
+        import time
+        start_t = None
+        if row and row["start_time"]:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(row["start_time"])
+                start_t = dt.timestamp()
+            except Exception:
+                start_t = time.time() - 3600
+        ss = {"session_id": session_id,
+              "start_time": start_t or (time.time() - 3600),
+              "alert_level": 0, "threshold_raised": 0.0}
+        sl = threading.Lock()
+        rs = RiskScorer(ss, sl)
+        rs._last_computed_time = 0
+        return rs.get_final_score()
+    except Exception as e:
+        return {"score": 0, "band": "N/A", "components": {}}
+
+def _get_analytics(operator_id: str) -> dict:
+    try:
+        from core.analytics_engine import AnalyticsEngine
+        ae = AnalyticsEngine()
+        return ae.get_operator_risk_profile(operator_id, days=30)
+    except Exception:
+        return {}
 
 # Try importing reportlab — graceful fallback if not installed
 try:
@@ -45,7 +80,16 @@ except ImportError:
 
 
 def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
-    """Generate a PDF report for the given session ID and operator name."""
+    """
+    Generate a PDF shift safety report.
+
+    Args:
+        session_id    : UUID of the session
+        operator_name : Display name of the operator
+
+    Returns:
+        filepath of generated PDF, or None on failure
+    """
     if not REPORTLAB_AVAILABLE:
         print("[REPORT] Cannot generate PDF — reportlab not available.")
         return None
@@ -118,9 +162,9 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             spaceAfter= 3,
         )
 
+       
+        # PAGE — HEADER
         
-        # PAGE 1 — HEADER
-        # Heder with title and horizontal rule
         story.append(Paragraph("Operator Fatigue Detection System", title_style))
         story.append(Paragraph("End-of-Shift Safety Report", h1_style))
         story.append(HRFlowable(width="100%", thickness=1,
@@ -157,9 +201,8 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
         story.append(info_table)
         story.append(Spacer(1, 0.5*cm))
 
-        
         # SUMMARY STATISTICS
-        # Visual representation of summary statistics
+        # Overall summary 
         story.append(Paragraph("Shift Summary", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=colors.HexColor("#CBD5E1")))
@@ -215,25 +258,24 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
         # Safety assessment
         if l3_count > 0:
             story.append(Paragraph(
-                f" WARNING: {l3_count} critical fatigue event(s) detected. "
+                f"WARNING: {l3_count} critical fatigue event(s) detected. "
                 "Operator safety review recommended before next shift.",
                 warning_style
             ))
         elif l2_count > 2:
             story.append(Paragraph(
-                f" CAUTION: {l2_count} moderate fatigue events. "
+                f"CAUTION: {l2_count} moderate fatigue events. "
                 "Consider shorter shifts or additional breaks.",
                 warning_style
             ))
         else:
             story.append(Paragraph(
-                " Shift completed without critical fatigue incidents.",
+                "Shift completed without critical fatigue incidents.",
                 body_style
             ))
 
-        
+       
         # PERCLOS TREND CHART
-        #If any fatigue events were recorded, generate a PERCLOS trend chart
         if MATPLOTLIB_AVAILABLE and fatigue_events:
             story.append(Spacer(1, 0.3*cm))
             story.append(Paragraph("PERCLOS Trend During Shift", h1_style))
@@ -245,9 +287,10 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             if chart:
                 story.append(chart)
 
-        
+       
+       
         # PAGE 2 — EVENT TIMELINE
-        #Timeline of fatigue events with details
+        # all Imp thing are mention on this page 
         story.append(Spacer(1, 0.5*cm))
         story.append(Paragraph("Event Timeline", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
@@ -310,8 +353,108 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             ))
 
         
+        # RISK SCORE SECTION (USP)
+        # Add in the report 
+        
+        story.append(Spacer(1, 0.4*cm))
+        story.append(Paragraph("Shift Risk Assessment", h1_style))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                color=colors.HexColor("#CBD5E1")))
+        story.append(Spacer(1, 0.2*cm))
+
+        risk_result = _get_risk_score(session_id)
+        risk_score  = risk_result.get("score", 0)
+        risk_band   = risk_result.get("band", "N/A")
+        risk_comps  = risk_result.get("components", {})
+
+        band_colors = {
+            "GREEN":  "#10B981", "AMBER": "#F59E0B",
+            "ORANGE": "#F97316", "RED":   "#EF4444", "N/A": "#94A3B8"
+        }
+        band_hex = band_colors.get(risk_band, "#94A3B8")
+
+        risk_summary_style = ParagraphStyle(
+            "RiskSummary", parent=styles["Normal"],
+            fontSize=22, textColor=colors.HexColor(band_hex),
+            fontName="Helvetica-Bold", spaceAfter=4
+        )
+        story.append(Paragraph(
+            f"Overall Shift Risk Score: {risk_score:.0f}/100 — {risk_band}",
+            risk_summary_style
+        ))
+
+        if risk_comps:
+            comp_data = [["Component", "Score", "Weight", "Contribution"]]
+            weights   = {"frequency": "30%", "severity": "30%",
+                         "ack_quality": "20%", "trend": "10%", "shift_time": "10%"}
+            labels    = {"frequency": "Alert Frequency",
+                         "severity": "Alert Severity",
+                         "ack_quality": "Acknowledgement Quality",
+                         "trend": "Fatigue Trend",
+                         "shift_time": "Shift Time Factor"}
+            for k, v in risk_comps.items():
+                w = weights.get(k, "—")
+                wf = float(w.strip('%')) / 100 if '%' in w else 0
+                contrib = round(v * wf, 1)
+                comp_data.append([labels.get(k, k), f"{v:.1f}", w, f"{contrib:.1f}"])
+
+            comp_table = Table(comp_data, colWidths=[6*cm, 3*cm, 2.5*cm, 3*cm])
+            comp_table.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTNAME",    (0,1), (-1,-1), "Helvetica"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),
+                 [colors.HexColor("#F8FAFC"), colors.HexColor("#EFF6FF")]),
+                ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+                ("PADDING",     (0,0), (-1,-1), 5),
+            ]))
+            story.append(comp_table)
+
+        
+        
+        comp_tbl = Table(compliance_items, colWidths=[5.5*cm, 4*cm, 7.5*cm])
+        comp_style_list = [
+            ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
+            ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+            ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+            ("FONTNAME",    (0,1), (-1,-1), "Helvetica"),
+            ("FONTSIZE",    (0,0), (-1,-1), 8),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),
+             [colors.HexColor("#F8FAFC"), colors.HexColor("#EFF6FF")]),
+            ("GRID",        (0,0), (-1,-1), 0.4, colors.HexColor("#CBD5E1")),
+            ("PADDING",     (0,0), (-1,-1), 5),
+        ]
+        # Highlight L3 row if events exist
+        if l3_count > 0:
+            comp_style_list.append(
+                ("TEXTCOLOR", (1,4), (1,4), colors.HexColor("#B91C1C"))
+            )
+        comp_tbl.setStyle(TableStyle(comp_style_list))
+        story.append(comp_tbl)
+
+        # Signature block
+        story.append(Spacer(1, 0.5*cm))
+        sig_data = [
+            ["Site Safety Officer", "System (Auto-generated)", "Operator"],
+            ["", "", ""],
+            ["_____________________", "_____________________", "_____________________"],
+            ["Signature / Stamp", "Fatigue Detection System v1.0", operator_name],
+        ]
+        sig_table = Table(sig_data, colWidths=[5.5*cm, 6*cm, 5.5*cm])
+        sig_table.setStyle(TableStyle([
+            ("FONTNAME",  (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE",  (0,0), (-1,-1), 8),
+            ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#374151")),
+            ("ALIGN",     (0,0), (-1,-1), "CENTER"),
+            ("TOPPADDING",(0,1), (-1,1),  20),
+        ]))
+        story.append(sig_table)
+
+        
         # FOOTER NOTES
-        # Add a footer note about data privacy and report generation
+        # We can change according to requirement 
         story.append(Spacer(1, 0.5*cm))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=colors.HexColor("#CBD5E1")))
@@ -327,7 +470,7 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
         # Build PDF
         doc.build(story)
         size = os.path.getsize(filepath)
-        print(f"[REPORT] PDF generated: {filename} ({size:,} bytes)")
+        print(f"[REPORT]  PDF generated: {filename} ({size:,} bytes)")
 
         write_audit_log("REPORT_EXPORT", "SYSTEM", session_id,
                         f"PDF: {filename}")
@@ -342,8 +485,6 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
 
 
 # PERCLOS CHART
-# Visualize PERCLOS and fatigue score trends over the shift using matplotlib
-
 def _build_perclos_chart(events: list, session: dict):
     """Build a matplotlib PERCLOS trend chart embedded in PDF."""
     try:
@@ -403,9 +544,8 @@ def _build_perclos_chart(events: list, session: dict):
         return None
 
 
-
 # HELPERS
-# Helper functions for date formatting and DB access
+
 
 def _get_session(session_id: str) -> dict:
     try:
