@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from ui.widgets import (
     EARGraphWidget, PERCLOSGauge, AlertStatusWidget,
-    HealthPanel, MetricRow, make_card, label, C_CARD
+    HealthPanel, MetricRow, make_card, label, C_CARD,
+    RiskScoreWidget, TrendIndicator
 )
 from ui.login_screen import LoginScreen
 from ui.calibration_screen import CalibrationScreen
@@ -28,7 +29,6 @@ from core.database import open_session, write_audit_log
 
 
 class DashboardWindow(QMainWindow):
-   
     def __init__(self, frame_buffer, frame_lock,
                  session_state, session_lock,
                  ack_event, shutdown_event,
@@ -57,7 +57,7 @@ class DashboardWindow(QMainWindow):
 
     
     # UI CONSTRUCTION
-    
+
 
     def _build_ui(self):
         self.stack = QStackedWidget()
@@ -125,7 +125,7 @@ class DashboardWindow(QMainWindow):
 
         main_layout.addLayout(left_col, stretch=3)
 
-        # RIGHT: Stats panels 
+        #  RIGHT: Stats panels
         right_col = QVBoxLayout()
         right_col.setSpacing(10)
 
@@ -160,8 +160,8 @@ class DashboardWindow(QMainWindow):
 
         flags_card = make_card()
         flags_layout = QVBoxLayout(flags_card)
-        self.glasses_lbl = label("👓 Glasses mode: No", size=10, color="#94A3B8")
-        self.drowsy_lbl  = label("⚠️ Drowsy at start: No", size=10, color="#94A3B8")
+        self.glasses_lbl = label("Glasses mode: No", size=10, color="#94A3B8")
+        self.drowsy_lbl  = label("Drowsy at start: No", size=10, color="#94A3B8")
         self.events_lbl  = label("Events this shift: 0", size=10, color="#94A3B8")
         flags_layout.addWidget(self.glasses_lbl)
         flags_layout.addWidget(self.drowsy_lbl)
@@ -170,6 +170,15 @@ class DashboardWindow(QMainWindow):
         gauge_row.addWidget(flags_card)
 
         right_col.addLayout(gauge_row)
+
+        # USP Risk score + USP 
+        usp_row = QHBoxLayout()
+        self.risk_widget  = RiskScoreWidget()
+        self.trend_widget = TrendIndicator()
+        usp_row.addWidget(self.risk_widget)
+        usp_row.addWidget(self.trend_widget)
+        usp_row.addStretch()
+        right_col.addLayout(usp_row)
 
         # System health panel
         self.health_panel = HealthPanel()
@@ -198,8 +207,9 @@ class DashboardWindow(QMainWindow):
 
         return root
 
+    
     # REFRESH TIMER — polls shared state, updates UI
-    # Heavy lifting is done in _refresh() which runs every ~66ms (15 FPS) via QTimer.
+   
 
     def _start_refresh_timer(self):
         self.timer = QTimer(self)
@@ -213,9 +223,8 @@ class DashboardWindow(QMainWindow):
 
         # Update video frame
         with self.frame_lock:
-            frame = self.frame_buffer.get("annotated")
-            if frame is None:
-                frame = self.frame_buffer.get("frame")
+            frame = self.frame_buffer.get("annotated") or \
+                    self.frame_buffer.get("frame")
 
         if frame is not None:
             self._display_frame(frame)
@@ -247,14 +256,20 @@ class DashboardWindow(QMainWindow):
         self.health_panel.update_health(fps, brightness, free_mb,
                                         face, demo, thr_raised)
 
+        
+        direction = ('rising' if trend_dir > 0.0005 and trend_r2 > 0.4
+                     else 'falling' if trend_dir < -0.0005
+                     else 'stable')
+        self.trend_widget.update_trend(direction, eta_min, trend_r2)
+
         self.operator_name_lbl.setText(f"Operator: {op_name}")
         self.state_lbl.setText(f"State: {self.sm.state.name}")
-
+        # Activate when any opertaor where glass
         self.glasses_lbl.setText(
-            f"👓 Glasses mode: {'Yes' if glasses else 'No'}"
+            f"Glasses mode: {'Yes' if glasses else 'No'}"
         )
         self.drowsy_lbl.setText(
-            f"⚠️ Drowsy at start: {'Yes' if drowsy else 'No'}"
+            f" Drowsy at start: {'Yes' if drowsy else 'No'}"
         )
 
         if start_time:
@@ -295,7 +310,7 @@ class DashboardWindow(QMainWindow):
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
-            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
             scaled = pixmap.scaled(
                 self.video_label.width(), self.video_label.height(),
@@ -307,7 +322,8 @@ class DashboardWindow(QMainWindow):
 
     
     # EVENT HANDLERS
-    # Handle signals from UI widgets, emit signals to main.py via callbacks, etc.
+    # Help to show case working of the USP 
+    
 
     def _handle_login(self, operator_id: str, demo_mode: bool):
         """Called when LoginScreen emits login_requested."""
@@ -318,7 +334,7 @@ class DashboardWindow(QMainWindow):
 
     def _on_ack(self):
         self.ack_event.set()
-        print("[UI] ✅ Acknowledged via spacebar")
+        print("[UI] Acknowledged via spacebar")
         QTimer.singleShot(100, self.ack_event.clear)
 
     def _toggle_demo(self):
