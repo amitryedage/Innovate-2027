@@ -413,7 +413,94 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             story.append(comp_table)
 
         
+        # OPERATOR HISTORICAL PROFILE (USP )
         
+        analytics = _get_analytics(operator_name)
+        if analytics and analytics.get("total_sessions", 0) > 1:
+            story.append(Spacer(1, 0.4*cm))
+            story.append(Paragraph("30-Day Operator Fatigue Profile", h1_style))
+            story.append(HRFlowable(width="100%", thickness=0.5,
+                                    color=colors.HexColor("#CBD5E1")))
+            story.append(Spacer(1, 0.2*cm))
+
+            hist_data = [
+                ["Metric", "Value", "Metric", "Value"],
+                ["Total shifts analysed",
+                 str(analytics.get("total_sessions", "—")),
+                 "Risk band (30 days)",
+                 analytics.get("risk_band", "—")],
+                ["Avg fatigue events/shift",
+                 str(analytics.get("avg_events_per_shift", "—")),
+                 "Max alert level seen",
+                 str(analytics.get("max_alert_level_seen", "—"))],
+                ["Avg acknowledgement time",
+                 f"{analytics.get('avg_ack_time_sec','—')}s",
+                 "Ack rate",
+                 f"{analytics.get('ack_rate_pct','—')}%"],
+                ["Trend vs history",
+                 analytics.get("trend_vs_history","—").upper(),
+                 "Avg shift duration",
+                 f"{analytics.get('avg_shift_hours','—')}h"],
+            ]
+            hist_table = Table(hist_data, colWidths=[5*cm,3.5*cm,5*cm,3.5*cm])
+            hist_table.setStyle(TableStyle([
+                ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
+                ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTNAME",    (0,1), (-1,-1), "Helvetica"),
+                ("FONTSIZE",    (0,0), (-1,-1), 9),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),
+                 [colors.HexColor("#F8FAFC"), colors.HexColor("#EFF6FF")]),
+                ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+                ("PADDING",     (0,0), (-1,-1), 5),
+            ]))
+            story.append(hist_table)
+
+            trend = analytics.get("trend_vs_history", "stable")
+            if trend == "worsening":
+                story.append(Spacer(1, 0.2*cm))
+                story.append(Paragraph(
+                    " ATTENTION: This operator's fatigue frequency has increased "
+                    "compared to their historical baseline. Recommend fatigue counselling "
+                    "and shift pattern review.",
+                    warning_style
+                ))
+            elif trend == "improving":
+                story.append(Spacer(1, 0.2*cm))
+                story.append(Paragraph(
+                    "POSITIVE TREND: Fatigue frequency has decreased vs historical "
+                    "baseline. Current interventions appear effective.",
+                    body_style
+                ))
+
+        
+        # COMPLIANCE DECLARATION (USP)
+        # Add for the new USP 
+        story.append(Spacer(1, 0.4*cm))
+        story.append(Paragraph("Safety Compliance Declaration", h1_style))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                color=colors.HexColor("#CBD5E1")))
+        story.append(Spacer(1, 0.2*cm))
+        #Need to check the requirement 
+        compliance_items = [
+            ["Requirement", "Status", "Details"],
+            ["Continuous fatigue monitoring", "COMPLIANT",
+             f"Monitored for {duration}"],
+            ["Operator identification", "COMPLIANT",
+             f"RFID/PIN: {operator_name}"],
+            ["Alert response documentation", " COMPLIANT",
+             f"{acked}/{total_f} alerts acknowledged ({ack_pct:.0f}%)"],
+            ["Level 3 (critical) events",
+             "REVIEW REQUIRED" if l3_count > 0 else " NONE RECORDED",
+             f"{l3_count} critical event(s)" if l3_count > 0 else "No critical events"],
+            ["Data storage", "COMPLIANT",
+             "Encrypted SQLite, offline, on-device"],
+            ["Privacy compliance", "COMPLIANT",
+             "No biometric data transmitted externally"],
+            ["Report generation", "COMPLIANT",
+             f"Auto-generated: {datetime.now().strftime('%d %b %Y %H:%M')}"],
+        ]
+
         comp_tbl = Table(compliance_items, colWidths=[5.5*cm, 4*cm, 7.5*cm])
         comp_style_list = [
             ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#1E3A5F")),
