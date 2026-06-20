@@ -557,3 +557,74 @@ class RiskScoreWidget(QWidget):
 
 
 
+# USP FATIGUE TREND INDICATOR
+# Show on the screen 
+class TrendIndicator(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(140, 52)
+        self._direction = "stable"
+        self._eta_min   = None
+        self._r2        = 0.0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+
+        self._title = QLabel("FATIGUE TREND")
+        self._title.setStyleSheet(
+            "color:#94A3B8;font-size:8px;font-weight:600;"
+            "background:transparent;border:none;"
+        )
+        self._title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._title)
+
+        self._arrow = QLabel("→  STABLE")
+        self._arrow.setStyleSheet(
+            "color:#94A3B8;font-size:13px;font-weight:700;"
+            "background:transparent;border:none;"
+        )
+        self._arrow.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._arrow)
+
+        self._eta_lbl = QLabel("")
+        self._eta_lbl.setStyleSheet(
+            "color:#94A3B8;font-size:8px;"
+            "background:transparent;border:none;"
+        )
+        self._eta_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._eta_lbl)
+
+        self.setStyleSheet(
+            "background:#1E293B;border:1px solid #334155;border-radius:6px;"
+        )
+
+    def update_trend(self, direction: str, eta_min=None, r2: float = 0.0):
+        self._direction = direction
+        self._eta_min   = eta_min
+        self._r2        = r2
+
+        if direction == "rising":
+            arrow_text = "↑  RISING"
+            color = "#EF4444"
+        elif direction == "falling":
+            arrow_text = "↓  FALLING"
+            color = "#10B981"
+        else:
+            arrow_text = "→  STABLE"
+            color = "#94A3B8"
+
+        self._arrow.setText(arrow_text)
+        self._arrow.setStyleSheet(
+            f"color:{color};font-size:13px;font-weight:700;"
+            "background:transparent;border:none;"
+        )
+
+        if eta_min and direction == "rising":
+            self._eta_lbl.setText(f"ETA ~{eta_min:.0f} min  R²={r2:.2f}")
+            self._eta_lbl.setStyleSheet(
+                "color:#F59E0B;font-size:8px;"
+                "background:transparent;border:none;"
+            )
+        else:
+            self._eta_lbl.setText("")
