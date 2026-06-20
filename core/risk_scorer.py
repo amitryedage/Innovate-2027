@@ -207,4 +207,66 @@ class RiskScorer:
         else:
             return min(30.0, slope * 1000 * r2)
 
-    
+    def _score_shift_time(self, hours: float) -> float:
+        """
+        Later in the shift = higher baseline risk even with no events.
+        Hours 0-4: 0-20, Hours 4-6: 20-60, Hours 6+: 60-100
+        """
+        if hours <= 4:
+            return (hours / 4.0) * 20.0
+        elif hours <= 6:
+            return 20.0 + ((hours - 4.0) / 2.0) * 40.0
+        else:
+            return min(100.0, 60.0 + ((hours - 6.0) / 2.0) * 40.0)
+
+    # ==========================================================
+    # HELPERS
+    # ==========================================================
+
+    def _band(self, score: float) -> str:
+        if score <= self.GREEN:  return "GREEN"
+        if score <= self.AMBER:  return "AMBER"
+        if score <= self.ORANGE: return "ORANGE"
+        return "RED"
+
+    def _band_color(self, band: str) -> str:
+        return {
+            "GREEN":  "#10B981",
+            "AMBER":  "#F59E0B",
+            "ORANGE": "#F97316",
+            "RED":    "#EF4444",
+        }.get(band, "#94A3B8")
+
+    def _get_result(self) -> dict:
+        return {
+            "score":       round(self._current_score, 1),
+            "band":        self._current_band,
+            "color":       self._band_color(self._current_band),
+            "components":  self._component_scores,
+            "history":     self._score_history[-20:],  # last 20 readings
+            "computed_at": self._last_computed_time,
+        }
+
+    def _zero_result(self) -> dict:
+        return {
+            "score":      0.0,
+            "band":       "GREEN",
+            "color":      "#10B981",
+            "components": {},
+            "history":    [],
+            "computed_at": 0,
+        }
+
+    def reset(self):
+        """Call at start of each new session."""
+        self._current_score      = 0.0
+        self._current_band       = "GREEN"
+        self._component_scores   = {}
+        self._last_computed_time = 0.0
+        self._score_history      = []
+        print("[RISK] Risk scorer reset for new session.")
+
+    def get_final_score(self) -> dict:
+        """Force a fresh compute for end-of-shift PDF."""
+        self._last_computed_time = 0.0
+        return self.compute()
