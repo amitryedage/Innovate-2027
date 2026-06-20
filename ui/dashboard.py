@@ -256,7 +256,15 @@ class DashboardWindow(QMainWindow):
         self.health_panel.update_health(fps, brightness, free_mb,
                                         face, demo, thr_raised)
 
-        
+        # USP  Risk score widget
+        with self.session_lock:
+            risk_score = self.session_state.get('risk_score', 0.0)
+            risk_band  = self.session_state.get('risk_band', 'GREEN')
+            trend_dir  = self.session_state.get('fatigue_trend_slope', 0.0)
+            trend_r2   = self.session_state.get('fatigue_trend_r2', 0.0)
+            eta_sec    = self.session_state.get('fatigue_eta_sec', None)
+        self.risk_widget.update_score(risk_score, risk_band)
+        eta_min = eta_sec / 60 if eta_sec else None
         direction = ('rising' if trend_dir > 0.0005 and trend_r2 > 0.4
                      else 'falling' if trend_dir < -0.0005
                      else 'stable')
