@@ -275,3 +275,363 @@ def validate_risk_score(harness: StressHarness) -> dict:
 
 
 
+# MAIN TEST RUNNER
+# Core of the Testing part 
+
+
+def run_profile(profile_name: str, baseline_ear: float, glasses_mode: bool,
+                noise: NoiseProfile, speed: float, seed: int) -> dict:
+    """Run one full 5-hour profile. Returns assertion result dict."""
+
+    print(f"\n{'='*60}")
+    print(f"  PROFILE: {profile_name}")
+    print(f"  baseline_ear={baseline_ear}  glasses={glasses_mode}  seed={seed}")
+    print(f"{'='*60}")
+
+    segments, phase_map = build_5hr_timeline(baseline_ear, glasses_mode, noise)
+    total_sec = sum(s.duration_sec for s in segments)
+    scenario  = build_timeline(segments, baseline_ear=baseline_ear,
+                               noise=noise, seed=seed)
+
+    print(f"  Timeline: {len(segments)} segments  "
+          f"{total_sec/3600:.2f}hr simulated  "
+          f"{len(scenario.frames):,} frames")
+
+    # Identify glare-only frame ranges (glasses mode)
+    glare_ranges = []
+    if glasses_mode:
+        frame_cursor = 0
+        for seg in segments:
+            n = int(seg.duration_sec * 30)
+            if seg.type == SegmentType.GLASSES_GLARE:
+                glare_ranges.append((frame_cursor, frame_cursor + n))
+            frame_cursor += n
+
+    harness = StressHarness(
+        operator_id    = f"OP_USP_{profile_name.upper()[:6]}",
+        baseline_ear   = baseline_ear,
+        baseline_mar   = 0.10,
+        baseline_pitch = 2.5 if glasses_mode else 2.0,
+        glasses_mode   = glasses_mode,
+        verbose        = False,   # suppress per-frame alert prints
+    )
+
+    # Pre-seed shift start time to simulate hour 5 of shift
+    # so shift_time component of risk scorer scores correctly
+    with harness.session_lock:
+        harness.session_state["start_time"] = time.time() - (4.5 * 3600)
+
+    harness.start_threads()
+    t0 = time.time()
+
+    print(f"  Running scenario (speed={'fast' if speed>=999 else 'real-time'})...")
+    harness.run_scenario(scenario, auto_ack_delay=4.0, speed_multiplier=speed)
+
+    elapsed = time.time() - t0
+    print(f"  Scenario complete in {elapsed:.1f}s")
+
+    # Collect results before stopping threads
+    summary        = harness.get_summary()
+    pred_result    = validate_predictive_engine(harness, phase_map, scenario.frames)
+    risk_result    = validate_risk_score(harness)
+    glare_alerts   = []
+    if glasses_mode:
+        for start_f, end_f in glare_ranges:
+            for ev in summary["event_log"]:
+                if start_f <= ev["frame"] <= end_f:
+                    glare_alerts.append(ev)
+
+    # Stop threads + generate PDF (USP 3)
+    harness.stop_threads(generate_report=True)
+    time.sleep(1.0)  # let PDF generate
+
+    # Check if PDF was generated
+    from config import REPORTS_DIR
+    pdfs = sorted([
+        f for f in os.listdir(REPORTS_DIR)
+        if f.endswith('.pdf') and 'USP' in f.upper()
+    ], key=lambda x: os.path.getmtime(os.path.join(REPORTS_DIR, x)))
+    latest_pdf = os.path.join(REPORTS_DIR, pdfs[-1]) if pdfs else None
+
+    return {
+        "profile":        profile_name,
+        "frames":         summary["frames_processed"],
+        "total_frames":   len(scenario.frames),
+        "alerts_fired":   summary["alerts_fired"],
+        "max_level":      summary["max_level_fired"],
+        "pred_result":    pred_result,
+        "risk_result":    risk_result,
+        "glare_alerts":   glare_alerts,
+        "pdf_path":       latest_pdf,
+        "pdf_size":       os.path.getsize(latest_pdf) if latest_pdf else 0,
+    }
+
+
+def assert_profile(r: dict, glasses_mode: bool):
+    """Run assertions on one profile's results."""
+    name = r["profile"]
+
+    #  Core pipeline 
+    check(f"[{name}] All frames processed",
+          r["frames"] == r["total_frames"],
+          r["total_frames"], r["frames"])
+
+    check(f"[{name}] At least 1 alert fired across 5hr shift",
+          r["alerts_fired"] >= 1,
+          ">= 1", r["alerts_fired"])
+
+    check(f"[{name}] Max alert level reached L2 or L3 (deep microsleeps present)",
+          r["max_level"] >= 2,
+          ">= 2", r["max_level"])
+
+    # ---- USP 4 — Predictive engine ----
+    pred = r["pred_result"]
+    check(f"[{name}] USP4: Enough samples collected for prediction "
+          f"({pred['samples_fed']}/{PREDICTION_MIN_SAMPLES} needed)",
+          pred["samples_fed"] >= PREDICTION_MIN_SAMPLES,
+          f">= {PREDICTION_MIN_SAMPLES}", pred["samples_fed"])
+
+    if pred["samples_fed"] >= PREDICTION_MIN_SAMPLES:
+        check(f"[{name}] USP4: Sustained drowsy buildup fires prediction",
+              pred["warning_fired"],
+              "warning_fired=True",
+              f"samples={pred['samples_fed']} scores={[round(s,2) for s in pred.get('scores',[])[:4]]}")
+
+        if pred.get("prediction"):
+            check(f"[{name}] USP4: R² >= {PREDICTION_MIN_R2} "
+                  f"(trend sustained, not noise)",
+                  pred.get("r2", 0) >= PREDICTION_MIN_R2,
+                  f">= {PREDICTION_MIN_R2}", pred.get("r2"))
+
+            check(f"[{name}] USP4: ETA within prediction horizon "
+                  f"({PREDICTION_HORIZON_SEC/60:.0f}min)",
+                  0 < (pred.get("eta_min", 0) * 60) <= PREDICTION_HORIZON_SEC,
+                  f"0-{PREDICTION_HORIZON_SEC/60:.0f}min",
+                  pred.get("eta_min"))
+
+            print(f"     Prediction: ETA={pred.get('eta_min')}min  "
+                  f"slope={pred.get('slope')}/min  R²={pred.get('r2')}")
+    else:
+        # Not enough positive-trend samples in the buildup window
+        # This can happen when the buildup window is short relative
+        # to PREDICTION_SAMPLE_INTERVAL_SEC — mark as skipped not failed
+        print(f"     USP4: Insufficient positive samples "
+              f"({pred['samples_fed']}/{PREDICTION_MIN_SAMPLES}) — "
+              f"prediction window too short for this profile (not a failure)")
+
+    # ---- USP — Risk score ----
+    risk = r["risk_result"]
+    check(f"[{name}] USP1: Risk score > 0 after 5hr harsh shift",
+          risk["score"] > 0,
+          "> 0", risk["score"])
+
+    check(f"[{name}] USP1: Risk band AMBER+ after deep microsleeps",
+          risk["band"] in ("AMBER", "ORANGE", "RED"),
+          "AMBER/ORANGE/RED", risk["band"])
+
+    check(f"[{name}] USP1: All 5 score components present",
+          len(risk["components"]) == 5,
+          "5 components", len(risk["components"]))
+
+    check(f"[{name}] USP1: Score in valid range 0-100",
+          0 <= risk["score"] <= 100,
+          "0-100", risk["score"])
+
+    print(f"     Risk: score={risk['score']:.1f}  band={risk['band']}")
+    print(f"     Components: {risk['components']}")
+
+    #  USP  — Analytics (checked once after all profiles) 
+    # (Tested in cross-profile assertions below)
+
+    #  USP  — Compliance PDF
+    check(f"[{name}] USP3: PDF generated at end of shift",
+          r["pdf_path"] is not None and os.path.exists(r["pdf_path"]),
+          "pdf file exists", r["pdf_path"])
+
+    if r["pdf_path"] and os.path.exists(r["pdf_path"]):
+        check(f"[{name}] USP3: PDF contains content (>4KB)",
+              r["pdf_size"] > 4000,
+              "> 4KB", f"{r['pdf_size']//1024}KB")
+        print(f"     PDF: {os.path.basename(r['pdf_path'])} "
+              f"({r['pdf_size']//1024}KB)")
+
+    # Glasses-specific: glare gate 
+    if glasses_mode:
+        check(f"[{name}] USP4/Glasses: Zero false alerts during glare segments",
+              len(r["glare_alerts"]) == 0,
+              "0 glare alerts",
+              f"{len(r['glare_alerts'])} alerts in glare windows")
+
+
+def assert_analytics_cross_profile(profile_names: list):
+    """
+    USP  assertions across all profiles together.
+    Runs after all harnesses have closed their sessions.
+    """
+    
+    print("  CROSS-PROFILE: USP  — Analytics Engine")
+   
+
+    ae = AnalyticsEngine()
+
+    # Each profile operator should appear in the ranking
+    ranking = ae.get_operator_ranking(days=1)
+    operator_ids_in_ranking = [r["operator_id"] for r in ranking]
+
+    for pname in profile_names:
+        op_id = f"OP_USP_{pname.upper()[:6]}"
+        check(f"USP: {op_id} appears in operator ranking",
+              op_id in operator_ids_in_ranking,
+              f"{op_id} in ranking", operator_ids_in_ranking[:5])
+
+    check(" USP Operator ranking is sorted by risk (highest first)",
+          all(
+              ranking[i]["risk_index"] >= ranking[i+1]["risk_index"]
+              for i in range(len(ranking) - 1)
+          ) if len(ranking) > 1 else True,
+          "descending risk_index", [r["risk_index"] for r in ranking[:5]])
+
+    peak = ae.get_peak_risk_hours(days=1)
+    check("USP2: Peak risk hours analysis returns data",
+          isinstance(peak, dict) and "hourly_data" in peak,
+          "hourly_data key", list(peak.keys()))
+
+    site = ae.get_site_summary(days=1)
+    check("USP: Site summary has site_risk_level",
+          "site_risk_level" in site,
+          "site_risk_level", list(site.keys()))
+
+    check("USP: Site has recommendations when shifts had events",
+          isinstance(site.get("recommendations"), list),
+          "list", type(site.get("recommendations")))
+
+    # Duration correlation
+    dur = ae.get_duration_fatigue_correlation(days=1)
+    check("USP2: Duration correlation runs without error",
+          isinstance(dur, dict),
+          "dict", type(dur))
+
+    if ranking:
+        top = ranking[0]
+        print(f"     Highest risk: {top['operator_id']} "
+              f"risk_index={top['risk_index']} "
+              f"l3_count={top.get('l3_count',0)}")
+    print(f"     Site risk level: {site.get('site_risk_level')}")
+
+
+
+# ENTRY POINT
+# Entry point for the testing of USP 
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fast", action="store_true",
+                        help="Process all frames at max speed (no real-time pacing)")
+    args = parser.parse_args()
+
+    speed = 999.0 if args.fast else 1.0
+
+    
+    print("  USP VALIDATION — 5-Hour Harsh Environment Test")
+    print(f"  Mode: {'FAST' if args.fast else 'REAL-TIME (5hr)'}")
+    print(f"  Testing: USP 1 (Risk Score) + USP 2 (Analytics)")
+    print(f"           USP 3 (Compliance PDF) + USP 4 (Predictive)")
+    
+
+    create_tables()
+
+    # ---- Profile definitions ----
+    profiles = [
+        {
+            "name":         "normal_excavator",
+            "baseline_ear": 0.30,
+            "glasses_mode": False,
+            "noise": NoiseProfile(
+                ear_jitter=0.015, mar_jitter=0.01, pitch_jitter=0.8,
+                vibration_hz=9.0, vibration_amp=0.012  # heavy excavator
+            ),
+            "seed": 5001,
+        },
+        {
+            "name":         "normal_dim_light",
+            "baseline_ear": 0.28,   # slightly lower in dim conditions
+            "glasses_mode": False,
+            "noise": NoiseProfile(
+                ear_jitter=0.018, mar_jitter=0.012, pitch_jitter=1.2,
+                vibration_hz=7.0, vibration_amp=0.010  # dumper on rough terrain
+            ),
+            "seed": 5002,
+        },
+        {
+            "name":         "glasses_high_vib",
+            "baseline_ear": 0.18,
+            "glasses_mode": True,
+            "noise": NoiseProfile(
+                ear_jitter=0.012, mar_jitter=0.015, pitch_jitter=1.8,
+                vibration_hz=12.0, vibration_amp=0.022  # worst-case crane vibration
+            ),
+            "seed": 5003,
+        },
+    ]
+
+    profile_results = []
+    profile_names   = [p["name"] for p in profiles]
+
+    for prof in profiles:
+        result = run_profile(
+            profile_name = prof["name"],
+            baseline_ear = prof["baseline_ear"],
+            glasses_mode = prof["glasses_mode"],
+            noise        = prof["noise"],
+            speed        = speed,
+            seed         = prof["seed"],
+        )
+        profile_results.append(result)
+
+        print(f"\n--- Assertions: {prof['name']} ---")
+        assert_profile(result, glasses_mode=prof["glasses_mode"])
+
+    # Cross-profile analytics assertions (USP 2)
+    assert_analytics_cross_profile(profile_names)
+
+    # ---- Final summary ----
+    
+    total = passed + failed
+    print(f"  FINAL RESULTS: {passed}/{total} checks passed")
+
+    if failed == 0:
+        print()
+        print(" ALL USP CHECKS PASSED — 5-hour harsh environment")
+        print()
+        print("  USP 4 — Predictive engine:")
+        for r in profile_results:
+            pred = r["pred_result"]
+            status = " NO WARN" if not pred.get("warning_fired") else "FIRED"
+            eta = f"ETA={pred.get('eta_min')}min" if pred.get("eta_min") else "n/a"
+            print(f"    [{r['profile']}]  {status}  {eta}  "
+                  f"R²={pred.get('r2', 'n/a')}")
+        print()
+        print("  USP 1 — Risk scores:")
+        for r in profile_results:
+            rk = r["risk_result"]
+            print(f"    [{r['profile']}]  "
+                  f"score={rk['score']:.1f}  band={rk['band']}")
+        print()
+        print("  USP 3 — PDFs generated:")
+        for r in profile_results:
+            if r["pdf_path"]:
+                print(f"    {os.path.basename(r['pdf_path'])} "
+                      f"({r['pdf_size']//1024}KB)")
+        print()
+        print(" System is ready for real-world deployment.")
+    else:
+        print(f"  {failed} CHECKS FAILED — fix before deployment")
+
+   
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
