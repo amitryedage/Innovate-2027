@@ -239,4 +239,159 @@ class AnalyticsEngine:
         finally:
             conn.close()
 
+    def get_site_summary(self, days: int = 14) -> dict:
+        """
+        Provides a site-wide fatigue risk summary and safety recommendations.
+        """
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = get_connection()
+        try:
+            row = conn.execute("""
+                SELECT COUNT(*) as total_events,
+                       MAX(e.alert_level) as max_level
+                FROM events e
+                JOIN sessions s ON e.session_id = s.session_id
+                WHERE e.event_type LIKE 'FATIGUE%'
+                AND e.timestamp >= ?
+            """, (since,)).fetchone()
+            
+            sess_count = conn.execute("""
+                SELECT COUNT(*) as total_sessions
+                FROM sessions
+                WHERE start_time >= ?
+                AND status IN ('CLOSED','CRASHED')
+            """, (since,)).fetchone()["total_sessions"] or 1
+            
+            total_events = row["total_events"] or 0
+            max_level = row["max_level"] or 0
+            avg_events = total_events / sess_count if sess_count > 0 else 0
+            
+            if max_level >= 3:
+                site_risk_level = "HIGH"
+            elif max_level >= 2 or avg_events >= 3:
+                site_risk_level = "MEDIUM"
+            else:
+                site_risk_level = "LOW"
+
+            recs = []
+            if max_level >= 3:
+                recs.append("Critical fatigue events detected — schedule immediate operator safety reviews")
+            if avg_events >= 2:
+                recs.append("Elevated fatigue frequency per shift — introduce mid-shift recovery breaks")
+            
+            unacked = conn.execute("""
+                SELECT COUNT(*) as count
+                FROM events e
+                JOIN sessions s ON e.session_id = s.session_id
+                WHERE e.event_type LIKE 'FATIGUE%'
+                AND e.timestamp >= ?
+                AND e.acknowledged = 0
+            """, (since,)).fetchone()["count"] or 0
+            if unacked > 0:
+                recs.append(f"Found {unacked} unacknowledged alert(s) — reinforce operator training on alert acknowledgment")
+                
+            if not recs:
+                recs.append("No significant fatigue risks detected. Maintain current operating protocols.")
+
+            return {
+                "site_risk_level": site_risk_level,
+                "recommendations": recs,
+                "total_events": total_events,
+                "max_level": max_level,
+            }
+        finally:
+            conn.close()
+
+    def get_duration_fatigue_correlation(self, days: int = 30) -> dict:
+        """
+        Analyses the relationship between shift duration and fatigue events.
+        """
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = get_connection()
+        try:
+            rows = conn.execute("""
+                SELECT s.session_id, s.start_time, s.end_time,
+                       COUNT(e.event_id) as total_events
+                FROM sessions s
+                LEFT JOIN events e
+                    ON s.session_id = e.session_id
+                    AND e.event_type LIKE 'FATIGUE%'
+                WHERE s.start_time >= ?
+                AND s.status IN ('CLOSED', 'CRASHED')
+                GROUP BY s.session_id
+            """, (since,)).fetchall()
+
+            data_points = []
+            durations = []
+            event_counts = []
+
+            for r in rows:
+                row = dict(r)
+                if row.get("start_time") and row.get("end_time"):
+                    try:
+                        t0 = datetime.fromisoformat(row["start_time"])
+                        t1 = datetime.fromisoformat(row["end_time"])
+                        dur_hours = (t1 - t0).total_seconds() / 3600
+                        events = row["total_events"] or 0
+                        data_points.append({
+                            "session_id": row["session_id"],
+                            "duration_hours": round(dur_hours, 2),
+                            "events": events
+                        })
+                        durations.append(dur_hours)
+                        event_counts.append(events)
+                    except Exception:
+                        pass
+
+            correlation = 0.0
+            n = len(data_points)
+            if n >= 2:
+                import numpy as np
+                try:
+                    corr_matrix = np.corrcoef(durations, event_counts)
+                    correlation = float(corr_matrix[0, 1])
+                    if np.isnan(correlation):
+                        correlation = 0.0
+                except Exception:
+                    mean_x = sum(durations) / n
+                    mean_y = sum(event_counts) / n
+                    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(durations, event_counts))
+                    den_x = sum((x - mean_x) ** 2 for x in durations)
+                    den_y = sum((y - mean_y) ** 2 for y in event_counts)
+                    if den_x > 0 and den_y > 0:
+                        correlation = num / ((den_x * den_y) ** 0.5)
+
+            buckets = defaultdict(list)
+            for dp in data_points:
+                dur = dp["duration_hours"]
+                if dur <= 2.0:
+                    bucket_name = "0-2 hours"
+                elif dur <= 4.0:
+                    bucket_name = "2-4 hours"
+                elif dur <= 6.0:
+                    bucket_name = "4-6 hours"
+                elif dur <= 8.0:
+                    bucket_name = "6-8 hours"
+                else:
+                    bucket_name = "8+ hours"
+                buckets[bucket_name].append(dp["events"])
+
+            bucket_summary = {}
+            for name, counts in buckets.items():
+                bucket_summary[name] = {
+                    "sessions": len(counts),
+                    "avg_events": round(sum(counts) / len(counts), 1) if counts else 0
+                }
+
+            return {
+                "analysis_days": days,
+                "data_points": data_points,
+                "correlation_coefficient": round(correlation, 3),
+                "bucket_summary": bucket_summary,
+                "total_sessions": n
+            }
+        finally:
+            conn.close()
+
+
     

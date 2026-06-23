@@ -624,7 +624,7 @@ def main():
                 print(f"    {os.path.basename(r['pdf_path'])} "
                       f"({r['pdf_size']//1024}KB)")
         print()
-        print(" System is ready for real-world deployment.")
+        print("Test part is done")
     else:
         print(f"  {failed} CHECKS FAILED — fix before deployment")
 
