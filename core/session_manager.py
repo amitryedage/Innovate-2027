@@ -1,13 +1,3 @@
-
-# session_manager.py — Multi-operator session lifecycle manager
-# RESPONSIBILITY:
-# Owns everything between "operator swipes card" and "PDF generated".
-# Designed to loop indefinitely — when one operator ends their shift,
-# this manager closes that session and prepares for the next operator
-# without restarting the process or any thread.
-
-
-
 import threading
 import time
 import queue
@@ -27,24 +17,6 @@ from config import RECALIBRATE_AFTER_DAYS
 
 
 class SessionManager:
-    """
-    Manages the full operator session lifecycle.
-
-    Usage:
-        mgr = SessionManager(session_state, session_lock,
-                             state_machine, db_queue,
-                             shutdown_event, ack_event)
-
-        # When operator logs in (called from UI callback):
-        mgr.start_session("OP001", demo_mode=False)
-
-        # When operator ends shift (called from UI button):
-        mgr.end_session()
-
-        # Poll this for calibration progress (called from UI refresh timer):
-        progress = mgr.get_calibration_progress()
-    """
-
     def __init__(self, session_state: dict, session_lock: threading.Lock,
                  state_machine: StateMachine,
                  db_queue: queue.Queue,
@@ -69,7 +41,7 @@ class SessionManager:
 
     
     # OPEN SESSION
-    # Validates operator exists or not 
+    # New session 
 
     def start_session(self, operator_id: str, demo_mode: bool = False):
         """
@@ -79,6 +51,12 @@ class SessionManager:
         3. Loads stored baseline OR starts fresh calibration
         4. Transitions state machine to CALIBRATING or MONITORING
         """
+        # Validate operator_id before touching DB
+        if not operator_id or not operator_id.strip():
+            print("[MGR]  start_session() called with empty operator_id — rejected")
+            return
+
+        operator_id = operator_id.strip()
         print(f"\n[MGR] Starting session for operator: {operator_id}")
 
         # Ensure operator exists in DB
@@ -118,10 +96,7 @@ class SessionManager:
         needs_calibration = self._needs_calibration(operator, demo_mode)
 
         if not needs_calibration:
-            # Load stored baseline directly — handover under 5 seconds.
-            # Still route through CALIBRATING briefly so the state machine
-            # transition graph is respected (WAITING_OPERATOR → CALIBRATING
-            # → MONITORING). This takes <1ms — no calibration actually runs.
+            
             self._load_stored_baseline(operator)
             self.sm.transition(SystemState.CALIBRATING)
             self.sm.transition(SystemState.MONITORING)
@@ -134,7 +109,7 @@ class SessionManager:
 
     
     # CLOSE SESSION
-    # Run when at the end of session 
+    # End of the session 
 
     def end_session(self, reason: str = "Operator ended shift"):
         """
@@ -176,7 +151,10 @@ class SessionManager:
         write_audit_log("SESSION_END", op_id or "UNKNOWN",
                         session_id, reason)
 
-        # Reset session_state to neutral (ready for next operator)
+        # Reset session_state to neutral (ready for next operator).
+        # IMPORTANT: every key that accumulates data during a session
+        # MUST be reset here. Missing a key causes cross-session data
+        # contamination. ack_times in particular must be [] not carried over.
         with self.session_lock:
             self.session_state.update({
                 "session_id":        None,
@@ -194,7 +172,12 @@ class SessionManager:
                 "alert_level":       0,
                 "alert_active":      False,
                 "threshold_raised":  0.0,
-                "ack_times":         [],
+                "ack_times":         [],    # MUST reset — accumulates per shift
+                "fatigue_trend_slope": 0.0, # MUST reset — carries trend from last op
+                "fatigue_trend_r2":    0.0,
+                "fatigue_eta_sec":     None,
+                "risk_score":          0.0,
+                "risk_band":           "GREEN",
             })
 
         # Route through SESSION_CLOSING before WAITING_OPERATOR
@@ -213,7 +196,7 @@ class SessionManager:
 
         self._cal_manager = None
 
-        print(f"[MGR]  Session closed. System ready for next operator.")
+        print(f"[MGR]Session closed. System ready for next operator.")
 
         # Notify UI to show login screen again
         if self.on_session_ended_callback:
@@ -221,8 +204,7 @@ class SessionManager:
 
     
     # CALIBRATION
-    # Apply when any new oprator is on boarded 
-    
+    # Fetch from the calibration
 
     def _needs_calibration(self, operator: dict, demo_mode: bool) -> bool:
         """
@@ -309,11 +291,11 @@ class SessionManager:
                   f"glasses={result['glasses_mode']}")
 
             if result.get("drowsy_at_start"):
-                print(f"[MGR]   Operator appears fatigued at shift start — "
+                print(f"[MGR]  Operator appears fatigued at shift start — "
                       f"baseline blended with population average")
 
         except CalibrationError as e:
-            print(f"\n[MGR]   Calibration failed: {e}")
+            print(f"\n[MGR] Calibration failed: {e}")
             print("[MGR] Using population defaults — monitoring continues")
             write_audit_log("CALIBRATION_FAILED", operator_id,
                             self.session_state.get("session_id"),
@@ -323,11 +305,11 @@ class SessionManager:
             # Always transition to MONITORING regardless of calibration outcome
             if self.sm.state == SystemState.CALIBRATING:
                 self.sm.transition(SystemState.MONITORING)
-                print("[MGR]  MONITORING active")
+                print("[MGR] MONITORING active")
 
    
-    # CALIBRATION PROGRESS 
-    
+    # CALIBRATION PROGRESS (polled by UI refresh timer)
+   
 
     def get_calibration_progress(self) -> dict:
         """Returns current calibration progress for the UI progress bar."""
@@ -343,7 +325,7 @@ class SessionManager:
 
   
     # OPERATOR REGISTRATION
-   # On board new opertator
+    # ON board process 
 
     def _ensure_operator(self, operator_id: str) -> dict:
         """
@@ -355,6 +337,7 @@ class SessionManager:
             return dict(operator)
 
         # First time this operator_id has been seen — register them
+        # On board new operator
         print(f"[MGR] New operator {operator_id} — registering...")
         conn = get_connection()
         try:
@@ -376,19 +359,18 @@ class SessionManager:
             conn.commit()
             write_audit_log("OPERATOR_REGISTERED", operator_id,
                             detail=f"Auto-registered on first RFID swipe")
-            #Check that oprator is vaild or invalid
             print(f"[MGR] Operator {operator_id} registered")
             return dict(get_operator(operator_id))
         except Exception as e:
-            print(f"[MGR]  Failed to register operator: {e}")
+            print(f"[MGR] Failed to register operator: {e}")
             return None
         finally:
             conn.close()
 
-   
+    
     # RFID SIMULATION (Phase 1 — keyboard proxy)
     # Phase 2 replaces this with GPIO RFID reader
-    # Just for the testing purpose need to change in the actual deployement
+    # Pin system is also possible
 
 
     def simulate_rfid_swipe(self, operator_id: str):
@@ -409,7 +391,7 @@ class SessionManager:
 
     
     # STATUS
-    # Status of the current session
+    # Current condition
 
     def get_status(self) -> dict:
         with self.session_lock:
