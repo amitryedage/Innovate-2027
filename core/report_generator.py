@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -12,7 +11,7 @@ from core.database import (
     get_connection, write_audit_log
 )
 
-
+# USP 1 + 2 integration (imported lazily to avoid circular imports)
 def _get_risk_score(session_id: str) -> dict:
     try:
         from core.risk_scorer import RiskScorer
@@ -64,7 +63,7 @@ try:
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
-    print("[REPORT]  reportlab not installed. Run: pip install reportlab")
+    print("[REPORT] reportlab not installed. Run: pip install reportlab")
 
 # Try importing matplotlib for PERCLOS chart
 try:
@@ -162,9 +161,9 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             spaceAfter= 3,
         )
 
-       
-        # PAGE — HEADER
         
+        # PAGE 1 
+       
         story.append(Paragraph("Operator Fatigue Detection System", title_style))
         story.append(Paragraph("End-of-Shift Safety Report", h1_style))
         story.append(HRFlowable(width="100%", thickness=1,
@@ -201,8 +200,9 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
         story.append(info_table)
         story.append(Spacer(1, 0.5*cm))
 
+        
         # SUMMARY STATISTICS
-        # Overall summary 
+        
         story.append(Paragraph("Shift Summary", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=colors.HexColor("#CBD5E1")))
@@ -274,8 +274,9 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
                 body_style
             ))
 
-       
+        
         # PERCLOS TREND CHART
+        
         if MATPLOTLIB_AVAILABLE and fatigue_events:
             story.append(Spacer(1, 0.3*cm))
             story.append(Paragraph("PERCLOS Trend During Shift", h1_style))
@@ -288,9 +289,8 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
                 story.append(chart)
 
        
-       
         # PAGE 2 — EVENT TIMELINE
-        # all Imp thing are mention on this page 
+        # What happen time at which this event get happen and all get store here 
         story.append(Spacer(1, 0.5*cm))
         story.append(Paragraph("Event Timeline", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
@@ -354,8 +354,7 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
 
         
         # RISK SCORE SECTION (USP)
-        # Add in the report 
-        
+       
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Shift Risk Assessment", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
@@ -413,7 +412,8 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             story.append(comp_table)
 
         
-        # OPERATOR HISTORICAL PROFILE (USP )
+        # OPERATOR HISTORICAL PROFILE (USP)
+        # Helpful in real word cases 
         
         analytics = _get_analytics(operator_name)
         if analytics and analytics.get("total_sessions", 0) > 1:
@@ -460,7 +460,7 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
             if trend == "worsening":
                 story.append(Spacer(1, 0.2*cm))
                 story.append(Paragraph(
-                    " ATTENTION: This operator's fatigue frequency has increased "
+                    "ATTENTION: This operator's fatigue frequency has increased "
                     "compared to their historical baseline. Recommend fatigue counselling "
                     "and shift pattern review.",
                     warning_style
@@ -475,23 +475,23 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
 
         
         # COMPLIANCE DECLARATION (USP)
-        # Add for the new USP 
+     
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Safety Compliance Declaration", h1_style))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=colors.HexColor("#CBD5E1")))
         story.append(Spacer(1, 0.2*cm))
-        #Need to check the requirement 
+
         compliance_items = [
             ["Requirement", "Status", "Details"],
             ["Continuous fatigue monitoring", "COMPLIANT",
              f"Monitored for {duration}"],
             ["Operator identification", "COMPLIANT",
              f"RFID/PIN: {operator_name}"],
-            ["Alert response documentation", " COMPLIANT",
+            ["Alert response documentation", "COMPLIANT",
              f"{acked}/{total_f} alerts acknowledged ({ack_pct:.0f}%)"],
             ["Level 3 (critical) events",
-             "REVIEW REQUIRED" if l3_count > 0 else " NONE RECORDED",
+             " REVIEW REQUIRED" if l3_count > 0 else "NONE RECORDED",
              f"{l3_count} critical event(s)" if l3_count > 0 else "No critical events"],
             ["Data storage", "COMPLIANT",
              "Encrypted SQLite, offline, on-device"],
@@ -541,7 +541,7 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
 
         
         # FOOTER NOTES
-        # We can change according to requirement 
+        # can be changed as per the requirement 
         story.append(Spacer(1, 0.5*cm))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=colors.HexColor("#CBD5E1")))
@@ -557,7 +557,7 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
         # Build PDF
         doc.build(story)
         size = os.path.getsize(filepath)
-        print(f"[REPORT]  PDF generated: {filename} ({size:,} bytes)")
+        print(f"[REPORT]PDF generated: {filename} ({size:,} bytes)")
 
         write_audit_log("REPORT_EXPORT", "SYSTEM", session_id,
                         f"PDF: {filename}")
@@ -565,13 +565,15 @@ def generate_report(session_id: str, operator_name: str = "Unknown") -> str:
 
     except Exception as e:
         import traceback
-        print(f"[REPORT]  PDF generation error: {e}")
+        print(f"[REPORT]PDF generation error: {e}")
         traceback.print_exc()
         return None
 
 
 
 # PERCLOS CHART
+
+
 def _build_perclos_chart(events: list, session: dict):
     """Build a matplotlib PERCLOS trend chart embedded in PDF."""
     try:
@@ -631,16 +633,19 @@ def _build_perclos_chart(events: list, session: dict):
         return None
 
 
+
 # HELPERS
 
 
 def _get_session(session_id: str) -> dict:
     try:
         conn = get_connection()
-        row  = conn.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        finally:
+            conn.close()
         return dict(row) if row else None
     except Exception:
         return None
