@@ -26,12 +26,31 @@ try:
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    print("[T4]   OpenCV not available — clip saving disabled.")
+    print("[T4]  OpenCV not available — clip saving disabled.")
 
 SHUTDOWN_SENTINEL = "SHUTDOWN"
 
 
 class StorageEngine(threading.Thread):
+    """
+    Thread 4 — All disk I/O isolated here.
+
+    Handles these message types from db_queue:
+        INSERT_EVENT        → insert_event() in SQLite
+        ACKNOWLEDGE_EVENT   → acknowledge_event() in SQLite
+        CHECKPOINT          → update_checkpoint() in SQLite
+        SAVE_CLIP           → save 10s MP4 clip to disk
+        GENERATE_REPORT     → trigger PDF generation
+        SESSION_CLOSE       → close session + auto-delete old clips
+        FLAG_THRESHOLD_CHANGE → log threshold change
+
+    Constructor args:
+        db_queue        : queue.Queue from Thread 1 + Thread 3
+        shutdown_event  : threading.Event
+        session_state   : dict (shared)
+        session_lock    : threading.Lock
+    """
+
     def __init__(self, db_queue, shutdown_event, session_state, session_lock):
         super().__init__(name="StorageEngine", daemon=True)
 
@@ -59,7 +78,7 @@ class StorageEngine(threading.Thread):
 
     
     # MAIN RUN LOOP
-    # Entry point for the thread — listens on db_queue and dispatches messages.  
+    # Entry point of the storage engine 
 
     def run(self):
         print("[T4] Storage engine starting...")
@@ -82,7 +101,7 @@ class StorageEngine(threading.Thread):
             try:
                 self._dispatch(action, msg)
             except Exception as e:
-                print(f"[T4]  Error processing '{action}': {e}")
+                print(f"[T4] Error processing '{action}': {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -90,7 +109,7 @@ class StorageEngine(threading.Thread):
 
     
     # MESSAGE DISPATCHER
-    # 
+    
 
     def _dispatch(self, action: str, msg: dict):
         if action == "INSERT_EVENT":
@@ -110,9 +129,9 @@ class StorageEngine(threading.Thread):
         else:
             pass  # Unknown action — ignore silently
 
-    
+   
     # EVENT INSERTION
-    # Insert fatigue/face-loss/tamper event into SQLite database and optionally save clip.
+    # Any event happened it get stored 
 
     def _handle_insert_event(self, msg: dict):
         """Write fatigue/face-loss/tamper event to SQLite."""
@@ -147,9 +166,9 @@ class StorageEngine(threading.Thread):
         if self.events_written % 10 == 0:
             print(f"[T4] Events written: {self.events_written}")
 
-   
+    
     # ACKNOWLEDGEMENT
-    # 
+   
 
     def _handle_acknowledge(self, msg: dict):
         """Update event with ack time."""
@@ -177,9 +196,8 @@ class StorageEngine(threading.Thread):
             acks.append(ack_time)
             self.session_state["ack_times"] = acks
 
-  
     # CHECKPOINT
-    # Write PERCLOS state checkpoint for crash recovery
+    # help at the time of crash recovery 
 
     def _handle_checkpoint(self, msg: dict):
         """Write PERCLOS state checkpoint for crash recovery."""
@@ -191,7 +209,7 @@ class StorageEngine(threading.Thread):
 
     
     # CLIP SAVING
-    # Save 10-second video clip (5s pre + 5s post event) to disk for Level 3 fatigue events.
+    # As the proof 
 
     def _save_clip(self, pre_frames: list, event_id: str, session_id: str):
         """
@@ -205,7 +223,7 @@ class StorageEngine(threading.Thread):
         # Check available storage
         free_mb = self._get_free_storage_mb()
         if free_mb < STORAGE_MIN_MB:
-            print(f"[T4]   Storage low ({free_mb:.0f}MB) — clip skipped.")
+            print(f"[T4] Storage low ({free_mb:.0f}MB) — clip skipped.")
             self.clips_skipped += 1
             with self.session_lock:
                 self.session_state["storage_warning"] = True
@@ -246,25 +264,27 @@ class StorageEngine(threading.Thread):
                 clip_size = os.path.getsize(filepath)
                 self.clips_saved  += 1
                 self.bytes_written += clip_size
-                print(f"[T4]  Clip saved: {filename} "
+                print(f"[T4] 📹 Clip saved: {filename} "
                       f"({frames_written} frames, {clip_size//1024}KB)")
 
                 # Store clip path in DB
                 try:
                     from core.database import get_connection
                     conn = get_connection()
-                    conn.execute("""
-                        UPDATE events SET clip_path=?
-                        WHERE session_id=? AND clip_path IS NULL
-                        ORDER BY timestamp DESC LIMIT 1
-                    """, (filepath, session_id))
-                    conn.commit()
-                    conn.close()
+                    try:
+                        conn.execute("""
+                            UPDATE events SET clip_path=?
+                            WHERE session_id=? AND clip_path IS NULL
+                            ORDER BY timestamp DESC LIMIT 1
+                        """, (filepath, session_id))
+                        conn.commit()
+                    finally:
+                        conn.close()
                 except Exception as e:
                     print(f"[T4] Could not update clip_path: {e}")
             else:
                 os.remove(filepath)
-                print("[T4]   Clip had no frames — deleted.")
+                print("[T4]Clip had no frames — deleted.")
 
         except Exception as e:
             print(f"[T4] Clip save error: {e}")
@@ -279,12 +299,14 @@ class StorageEngine(threading.Thread):
             session_id = msg.get("session_id", ""),
         )
 
-    
+  
     # SESSION CLOSE
-    # Session close message triggers auto-delete of old clips and optional PDF report generation.
-
+    # End of the session 
     def _handle_session_close(self, msg: dict):
-        
+        """
+        Close session in DB, run auto-delete, trigger PDF generation.
+        Called when operator ends shift or new operator swipes in.
+        """
         session_id = msg.get("session_id")
         if not session_id:
             return
@@ -313,10 +335,14 @@ class StorageEngine(threading.Thread):
 
     
     # REPORT GENERATION
-    # Generate PDF report for session
+    # Check all the edge cases here 
 
     def _handle_generate_report(self, msg: dict):
-       
+        """
+        Trigger PDF report generation.
+        Imports report_generator lazily to avoid circular imports.
+        Wraps in try-except — PDF failure must never block session close.
+        """
         session_id    = msg.get("session_id")
         operator_name = msg.get("operator_name", "Unknown")
 
@@ -328,11 +354,11 @@ class StorageEngine(threading.Thread):
             from core.report_generator import generate_report
             pdf_path = generate_report(session_id, operator_name)
             if pdf_path:
-                print(f"[T4]  PDF report saved: {pdf_path}")
+                print(f"[T4] PDF report saved: {pdf_path}")
                 with self.session_lock:
                     self.session_state["last_report_path"] = pdf_path
             else:
-                print("[T4]   PDF generation returned no path.")
+                print("[T4]PDF generation returned no path.")
         except ImportError:
             print("[T4] report_generator not yet implemented (Day 5).")
         except Exception as e:
@@ -351,9 +377,9 @@ class StorageEngine(threading.Thread):
         with self.session_lock:
             self.session_state["threshold_raised"] = msg.get("amount", 0)
 
-    
+  
     # STORAGE UTILITIES
-    # Returns free disk space in MB for the clips directory 
+  
 
     def _get_free_storage_mb(self) -> float:
         """Returns free disk space in MB for the clips directory."""
@@ -373,11 +399,9 @@ class StorageEngine(threading.Thread):
             "free_mb":        self._get_free_storage_mb(),
         }
 
-   
+    
     # CLEANUP
-    # Clean everything once done 
-
     def _cleanup(self):
         print(f"[T4] Final stats: events={self.events_written} "
               f"clips={self.clips_saved} skipped={self.clips_skipped}")
-        print("[T4]  StorageEngine cleaned up.")
+        print("[T4] StorageEngine cleaned up.")
