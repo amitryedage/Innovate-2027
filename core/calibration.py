@@ -22,8 +22,6 @@ class CalibrationError(Exception):
 
 
 class CalibrationManager:
-
-
     def __init__(self, session_state: dict, session_lock: threading.Lock,
                  shutdown_event: threading.Event):
         self.session_state  = session_state
@@ -48,11 +46,11 @@ class CalibrationManager:
         self.glasses_mode    = False
         self.drowsy_at_start = False
 
-    # MAIN ENTRY POINT ( Run the full calibration sequence.)
+    
+    # MAIN ENTRY POINT
     
 
     def run(self, operator_id: str, demo_mode: bool = False) -> dict:
-       
         duration = DEMO_CALIBRATION_SEC if demo_mode else CALIBRATION_DURATION_SEC
         retries  = 0
 
@@ -67,7 +65,7 @@ class CalibrationManager:
                 self._analyse_baseline(result)
                 self._store_baseline(operator_id)
                 self._update_session_state()
-                print(f"[CAL]  Calibration complete for {operator_id}")
+                print(f"[CAL] Calibration complete for {operator_id}")
                 print(f"[CAL]    baseline_EAR   = {self.baseline_ear:.3f}"
                       f"  {'(GLASSES MODE)' if self.glasses_mode else ''}")
                 print(f"[CAL]    baseline_MAR   = {self.baseline_mar:.3f}")
@@ -88,7 +86,7 @@ class CalibrationManager:
 
             except CalibrationError as e:
                 retries += 1
-                print(f"[CAL] ⚠️  Calibration attempt {retries} failed: {e}")
+                print(f"[CAL]  Calibration attempt {retries} failed: {e}")
                 if retries <= CALIBRATION_RETRY_LIMIT:
                     self.status_message = (
                         "Calibration failed — please look at the camera. Retrying..."
@@ -102,12 +100,10 @@ class CalibrationManager:
                         f"attempts. Please ensure your face is clearly visible."
                     )
 
-    
     # SAMPLE COLLECTION
-   
+    # Used for the calibration process 
 
     def _collect_baseline(self, duration: float) -> dict:
-       
         self._clear_samples()
         self.is_running      = True
         self.status_message  = "Look straight at the camera and stay relaxed..."
@@ -122,6 +118,10 @@ class CalibrationManager:
         while (time.time() - start_time) < duration:
             if self.shutdown_event.is_set():
                 raise CalibrationError("Shutdown requested during calibration")
+
+            # Check for handover interrupt (set by session_manager.end_session)
+            if getattr(self, '_interrupted', False):
+                raise CalibrationError("Calibration cancelled — operator handover")
 
             elapsed   = time.time() - start_time
             self.progress_pct = min(100.0, (elapsed / duration) * 100.0)
@@ -154,7 +154,7 @@ class CalibrationManager:
                 self.status_message = (
                     "Please look directly at the camera..."
                 )
-                print(f"[CAL]   Low face detection "
+                print(f"[CAL] Low face detection "
                       f"({self.face_pct*100:.0f}%) — prompting operator")
 
             # Sample at ~10Hz (enough for good statistics)
@@ -185,15 +185,19 @@ class CalibrationManager:
 
     
     # BASELINE ANALYSIS
-    
+    # Important to check that opertor uses glasses or not 
 
     def _analyse_baseline(self, result: dict):
-       
+        """
+        Compute baseline statistics from collected samples.
+        Handles glasses detection and drowsy baseline detection.
+        """
         ear_arr   = np.array(result["ear_samples"])
         mar_arr   = np.array(result["mar_samples"])
         pitch_arr = np.array(result["pitch_samples"])
 
-        
+        # Use median instead of mean — more robust to outliers
+        # (blinks during calibration would pull mean down)
         raw_ear_baseline   = float(np.percentile(ear_arr,   75))
         raw_mar_baseline   = float(np.median(mar_arr))
         raw_pitch_baseline = float(np.median(pitch_arr))
@@ -204,25 +208,16 @@ class CalibrationManager:
               f"EAR min={ear_arr.min():.3f} max={ear_arr.max():.3f} "
               f"std={ear_arr.std():.3f}")
 
-        
+        # ----------------------------------------------------------
         # GLASSES DETECTION
         # If baseline EAR is abnormally low → operator wears glasses
         # Reflective lenses cause MediaPipe to under-read eye openness
-        # In glasses mode, we rely more on MAR and head pitch for fatigue detection
+        # ----------------------------------------------------------
         self.glasses_mode = raw_ear_baseline < EAR_GLASSES_THRESH
         if self.glasses_mode:
-            print(f"[CAL]  GLASSES MODE activated "
+            print(f"[CAL] GLASSES MODE activated "
                   f"(baseline EAR {raw_ear_baseline:.3f} < {EAR_GLASSES_THRESH})")
-            # In glasses mode, MAR and pitch become primary signals
-            # Do not adjust baseline — detection.py handles the weighting
-
-        
-        # DROWSY BASELINE DETECTION(Reserch insight from real-world testing)
-        # If operator starts shift already fatigued, their baseline EAR
-        # will be lower than population average.
-        # We blend their personal baseline with population average
-        # to avoid the system being too lenient from the start.
-    
+            
         population_avg_ear = EAR_OPEN_NORMAL   # 0.30
 
         if raw_ear_baseline < EAR_DROWSY_BASELINE:  # < 0.255
@@ -230,7 +225,7 @@ class CalibrationManager:
             blend_weight = 0.70   # 70% personal, 30% population
             blended_ear  = (blend_weight * raw_ear_baseline +
                             (1 - blend_weight) * population_avg_ear)
-            print(f"[CAL]  DROWSY BASELINE detected "
+            print(f"[CAL] DROWSY BASELINE detected "
                   f"(EAR {raw_ear_baseline:.3f} < {EAR_DROWSY_BASELINE})")
             print(f"[CAL]    Blending: {raw_ear_baseline:.3f} * 0.7 + "
                   f"{population_avg_ear} * 0.3 = {blended_ear:.3f}")
@@ -242,17 +237,17 @@ class CalibrationManager:
         self.baseline_mar   = raw_mar_baseline
         self.baseline_pitch = raw_pitch_baseline
 
-        # Sanity bounds — clamp to realistic ranges(Calibration should never produce values outside these or else something went very wrong)
+        # Sanity bounds — clamp to realistic ranges
         self.baseline_ear   = float(np.clip(self.baseline_ear,   0.15, 0.45))
         self.baseline_mar   = float(np.clip(self.baseline_mar,   0.02, 0.40))
         self.baseline_pitch = float(np.clip(self.baseline_pitch, 0.0,  20.0))
 
- 
+    
     # STORE TO DATABASE
-    #Store the computed baseline values in the operators table for this operator_id.
+   
 
     def _store_baseline(self, operator_id: str):
-        
+        """Persist baseline values to operators table in SQLite."""
         update_operator_baseline(
             operator_id    = operator_id,
             baseline_ear   = self.baseline_ear,
@@ -264,11 +259,13 @@ class CalibrationManager:
 
     
     # UPDATE SESSION STATE
- 
-    # Push baseline values into shared session_state.
-    #Thread 1 (detection) reads these to compute fatigue score.
+   
+
     def _update_session_state(self):
-        
+        """
+        Push baseline values into shared session_state.
+        Thread 1 (detection) reads these to compute fatigue score.
+        """
         with self.session_lock:
             self.session_state["baseline_ear"]    = self.baseline_ear
             self.session_state["baseline_mar"]    = self.baseline_mar
@@ -278,8 +275,12 @@ class CalibrationManager:
 
         print("[CAL] Session state updated with personal baseline.")
 
-    # HELPERS functions to reset samples and get progress for UI display
+   
+    # HELPERS
+   
+
     def _clear_samples(self):
+        """Reset sample lists for a retry."""
         self.ear_samples   = []
         self.mar_samples   = []
         self.pitch_samples = []
@@ -287,6 +288,10 @@ class CalibrationManager:
         self.face_pct      = 0.0
 
     def get_progress(self) -> dict:
+        """
+        Returns current calibration progress.
+        Called by UI thread to update progress bar.
+        """
         return {
             "progress_pct":   self.progress_pct,
             "face_pct":       self.face_pct * 100,
