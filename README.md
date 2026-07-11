@@ -587,18 +587,6 @@ pie title Test Coverage — 190 Total Checks
 | C11 | 80 simultaneous DB writes | L3 + clip + checkpoint | ✅ 0 lock errors |
 | C12 | SD card < 200MB free | Pi card after 3 weeks | ✅ Graceful degradation |
 
-### Production Bugs Found Before Deployment
-
-> These bugs were found by the test suite — not by a demo, not by code inspection alone.
-> Every one would have caused real harm on a live site.
-
-| # | Bug | Severity | Found By | Impact If Shipped |
-|---|---|---|---|---|
-| B1 | Glasses threshold fixed at 0.18 | 🔴 **Critical** | C9 real-world test | L3 false alerts every 3s for 15% of workforce |
-| B2 | Glare gate — no duration check | 🔴 **Critical** | C9 development | Microsleeps completely silent for glasses wearers |
-| B3 | CalibrationManager._interrupted never checked | 🔴 **Safety-critical** | Code review | Wrong thresholds all shift, silent, no error |
-| B4 | Empty operator_id accepted | 🟡 Low | Code review | Silent monitoring with default thresholds |
-| B5 | DB connections without finally | 🟠 Medium | Code review | Database locked after hours of operation |
 
 ### Project Scale
 
