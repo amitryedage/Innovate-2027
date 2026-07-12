@@ -815,6 +815,6 @@ fatigue_detection/
 
 <br/>
 
-*FatigueGuard POC — Submission Ready*
+*FatigueGuard POC*
 
 </div>
