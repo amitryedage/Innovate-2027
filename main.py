@@ -3,8 +3,10 @@
 # SessionManager, RiskScorer, AnalyticsEngine, CrashRecovery
 
 
-import sys, signal, threading, queue, time, os
+import sys, signal, threading, queue, time, os, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import cv2
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore    import QTimer
@@ -21,7 +23,8 @@ from core.predictive_engine import PredictiveEngine
 from core.risk_scorer       import RiskScorer
 from core.analytics_engine  import AnalyticsEngine
 from ui.dashboard           import DashboardWindow
-from config                 import ALERT_QUEUE_MAX, DB_QUEUE_MAX
+from ui                     import theme
+from config                 import ALERT_QUEUE_MAX, DB_QUEUE_MAX, CAMERA_INDEX
 
 
 # SHARED OBJECTS
@@ -58,6 +61,10 @@ session_state = {
     "fatigue_score":     0.0,
     # Alerts
     "alert_level":       0,
+    "alert_reason":      "",
+    "fatigue_level":     0,
+    "fatigue_reason":    "",
+    "alert_count":       0,
     "alert_active":      False,
     "alert_fired_time":  0.0,
     "threshold_raised":  0.0,
@@ -152,6 +159,32 @@ def signal_handler(sig, frame):
 
 
 
+# CAMERA PERMISSION (macOS)
+# OpenCV can only show the macOS camera prompt from the main thread.
+# Thread 1 opens the camera from a worker thread, so probe once here first.
+
+def ensure_camera_permission():
+    if sys.platform != "darwin":
+        return
+    print("[MAIN] Checking camera access...")
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    ok  = cap.isOpened()
+    cap.release()
+    if ok:
+        print("[MAIN]  Camera access OK.")
+    else:
+        print("[MAIN]  Camera not available. If access was denied, enable it for")
+        print("        your terminal app in System Settings -> Privacy & Security")
+        print("        -> Camera, then restart.")
+
+
+def log_uncaught_exception(exc_type, exc_value, exc_tb):
+    # PyQt5 aborts the whole process on an exception inside a Qt slot.
+    # Log it instead so one UI error cannot stop fatigue monitoring.
+    traceback.print_exception(exc_type, exc_value, exc_tb)
+
+
+
 # UI CALLBACKS
 
 def handle_login(operator_id: str, demo_mode: bool):
@@ -208,6 +241,8 @@ def main():
     print("="*60)
 
     signal.signal(signal.SIGINT, signal_handler)
+    sys.excepthook = log_uncaught_exception
+    ensure_camera_permission()
 
     # Step 1 — DB integrity check + crash recovery
     print("\n[MAIN] Running startup recovery...")
@@ -265,6 +300,7 @@ def main():
     # Step 7 — Qt app + dashboard
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    theme.apply(app)
 
     window = DashboardWindow(
         frame_buffer, frame_lock,
@@ -275,6 +311,7 @@ def main():
         on_shutdown_callback = shutdown,
     )
 
+    window.set_calibration_manager(session_manager)
     window.end_shift_btn.clicked.disconnect()
     window.end_shift_btn.clicked.connect(handle_end_shift)
 

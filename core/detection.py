@@ -1,5 +1,6 @@
 import threading
 import time
+import traceback
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -18,9 +19,10 @@ from config import (
     LEFT_EYE, RIGHT_EYE, MOUTH,
     EMA_ALPHA,
     EAR_GLASSES_THRESH, EAR_OPEN_NORMAL,
-    MAR_YAWN_THRESH,
-    PITCH_DROOP_THRESH,
-    PERCLOS_WINDOW_FRAMES,
+    EAR_CLOSED_NORMAL, EAR_CLOSED_GLASSES,
+    MAR_YAWN_THRESH, YAWN_DURATION_SEC,
+    PITCH_DROOP_THRESH, PITCH_DROOP_SEC,
+    PERCLOS_WINDOW_FRAMES, PERCLOS_MIN_FRAMES,
     FATIGUE_L1_THRESH, FATIGUE_L2_THRESH, FATIGUE_L3_THRESH,
     SHIFT_HOUR_4_MULT, SHIFT_HOUR_6_MULT,
     DEBOUNCE_FRAMES,
@@ -92,6 +94,10 @@ class DetectionThread(threading.Thread):
         self.confirm_counter     = 0
         self.current_alert_level = 0
 
+        # Consecutive frames of open mouth / drooped head
+        self.yawn_frames  = 0
+        self.droop_frames = 0
+
         # Face loss tracking
         self.face_loss_frames  = 0
         self.face_loss_logged  = False
@@ -102,6 +108,9 @@ class DetectionThread(threading.Thread):
 
         # Checkpoint timer
         self.last_checkpoint = time.time()
+
+        # Per-frame error counts (so one bad frame can't stop monitoring)
+        self._frame_errors  = {}
 
         # FPS tracking
         self.fps            = 0
@@ -115,6 +124,9 @@ class DetectionThread(threading.Thread):
     # Entry point 
     def run(self):
         print("[T1] Starting...")
+        # Initial heartbeat — lets the watchdog catch a camera that never opens
+        with self.session_lock:
+            self.session_state["last_frame_time"] = time.time()
         if not self._init_camera():
             print("[T1]  Camera failed. Exiting.")
             return
@@ -124,13 +136,24 @@ class DetectionThread(threading.Thread):
         print("[T1]  Ready. Detection loop running.")
         try:
             while not self.shutdown_event.is_set():
-                self._process_frame()
-        except Exception as e:
-            import traceback
-            print(f"[T1]  Error: {e}")
-            traceback.print_exc()
+                try:
+                    self._process_frame()
+                except Exception as e:
+                    # One bad frame must not leave the operator unmonitored
+                    self._log_frame_error(e)
+                    time.sleep(0.033)
         finally:
             self._cleanup()
+
+    def _log_frame_error(self, e: Exception):
+        key = f"{type(e).__name__}: {e}"
+        n   = self._frame_errors.get(key, 0) + 1
+        self._frame_errors[key] = n
+        if n == 1:
+            print(f"[T1]  Frame error (continuing): {key}")
+            traceback.print_exc()
+        elif n % 300 == 0:
+            print(f"[T1]  Frame error repeated {n}x: {key}")
 
     
     # INIT
@@ -156,12 +179,12 @@ class DetectionThread(threading.Thread):
         Initialize MediaPipe FaceLandmarker using new Tasks API.
         Requires face_landmarker.task model file in assets/ folder.
         Download it once by running:
-            python scripts/download_model.py
+            uv run scripts/download_model.py
         """
         model_path = os.path.abspath(MODEL_PATH)
         if not os.path.exists(model_path):
             print(f"[T1]  Model file not found: {model_path}")
-            print("[T1]    Run:  python scripts/download_model.py")
+            print("[T1]    Run:  uv run scripts/download_model.py")
             return False
 
         print(f"[T1] Loading FaceLandmarker model from {model_path}...")
@@ -190,6 +213,10 @@ class DetectionThread(threading.Thread):
             time.sleep(0.033)
             return
 
+        # Heartbeat for DetectionWatchdog
+        with self.session_lock:
+            self.session_state["last_frame_time"] = time.time()
+
         # Preprocess
         processed = self._preprocess(frame)
 
@@ -204,6 +231,7 @@ class DetectionThread(threading.Thread):
         # Only run detection when monitoring or calibrating
         if not self.sm.is_monitoring_active() and \
            self.sm.state != SystemState.CALIBRATING:
+            self._clear_annotated()
             self._update_fps()
             return
 
@@ -214,6 +242,7 @@ class DetectionThread(threading.Thread):
 
         # No face detected
         if not result.face_landmarks:
+            self._clear_annotated()
             self._handle_face_loss()
             self._update_fps()
             return
@@ -324,8 +353,15 @@ class DetectionThread(threading.Thread):
             return 0.0
 
         rmat, _ = cv2.Rodrigues(rvec)
-        angles, *_ = cv2.RQDecomp3x3(rmat)
-        return abs(angles[0] * 360)
+        angles, *_ = cv2.RQDecomp3x3(rmat)   # already in degrees
+        pitch = angles[0]
+        # FACE_3D_MODEL is y-up but image coords are y-down, so a level
+        # head decomposes to ~±180°. Fold it back around 0.
+        if pitch > 90:
+            pitch -= 180
+        elif pitch < -90:
+            pitch += 180
+        return abs(pitch)
 
    
     # PERCLOS ENGINE
@@ -333,7 +369,7 @@ class DetectionThread(threading.Thread):
     # Glasses-mode glare frames are filtered out so they don't count as closed.
 
     def _update_perclos(self, glasses_mode: bool) -> float:
-        ear_threshold = 0.22 if not glasses_mode else 0.18
+        ear_threshold = EAR_CLOSED_GLASSES if glasses_mode else EAR_CLOSED_NORMAL
 
         # Glasses-mode glare gate:
         # If EAR drops below threshold BUT MAR and pitch are resting,
@@ -357,11 +393,12 @@ class DetectionThread(threading.Thread):
             return 0.0
 
         closed      = sum(1 for e in self.ear_deque if e < ear_threshold)
-        perclos     = (closed / len(self.ear_deque)) * 100.0
+        perclos     = (closed / max(len(self.ear_deque), PERCLOS_MIN_FRAMES)) * 100.0
 
         with self.session_lock:
             baseline_ear = self.session_state.get("baseline_ear", 0.30)
-            shift_start  = self.session_state.get("start_time", time.time())
+            # start_time is None between sessions (key present, value None)
+            shift_start  = self.session_state.get("start_time") or time.time()
 
         baseline_perclos = max(2.0, (1.0 - baseline_ear / 0.35) * 20.0)
         fatigue_score    = (perclos - baseline_perclos) / baseline_perclos \
@@ -387,8 +424,15 @@ class DetectionThread(threading.Thread):
         demo = self.session_state.get("demo_mode", False)
         l1   = DEMO_L1_THRESH if demo else FATIGUE_L1_THRESH
 
-        yawn_active  = self.smooth_mar   > MAR_YAWN_THRESH
-        droop_active = self.smooth_pitch > PITCH_DROOP_THRESH
+        # Yawn / droop only count once sustained, so talking or a quick
+        # glance down does not fire an alert (frames, like PERCLOS window)
+        self.yawn_frames  = self.yawn_frames + 1  \
+            if self.smooth_mar   > MAR_YAWN_THRESH    else 0
+        self.droop_frames = self.droop_frames + 1 \
+            if self.smooth_pitch > PITCH_DROOP_THRESH else 0
+
+        yawn_active  = self.yawn_frames  >= YAWN_DURATION_SEC * FPS_TARGET
+        droop_active = self.droop_frames >= PITCH_DROOP_SEC   * FPS_TARGET
 
         if   fatigue_score >= FATIGUE_L3_THRESH or \
              (fatigue_score >= FATIGUE_L2_THRESH and yawn_active):
@@ -396,9 +440,23 @@ class DetectionThread(threading.Thread):
         elif fatigue_score >= FATIGUE_L2_THRESH or \
              (fatigue_score >= l1 and droop_active):
             required = 2
-        elif fatigue_score >= l1 or yawn_active:
+        elif fatigue_score >= l1 or yawn_active or droop_active:
             required = 1
         else:
+            required = 0
+
+        reasons = []
+        if fatigue_score >= l1: reasons.append("Eyes closing")
+        if yawn_active:         reasons.append("Yawning")
+        if droop_active:        reasons.append("Head drooping")
+        reason = " + ".join(reasons)
+
+        # Live condition — AlertEngine uses this to clear or escalate
+        with self.session_lock:
+            self.session_state["fatigue_level"]  = required
+            self.session_state["fatigue_reason"] = reason
+
+        if required == 0:
             self.confirm_counter     = 0
             self.current_alert_level = 0
             return
@@ -408,16 +466,18 @@ class DetectionThread(threading.Thread):
             return
 
         if required > self.current_alert_level:
-            self._fire_alert(required, ear, mar, pitch, fatigue_score)
+            self._fire_alert(required, ear, mar, pitch, fatigue_score,
+                             reason=reason)
 
     def _fire_alert(self, level: int, ear: float, mar: float,
-                    pitch: float, fatigue_score: float):
+                    pitch: float, fatigue_score: float, reason: str = ""):
         with self.session_lock:
             session_id = self.session_state.get("session_id")
 
         event = {
             "type":          f"FATIGUE_L{level}",
             "level":         level,
+            "reason":        reason,
             "ear":           round(ear, 3),
             "mar":           round(mar, 3),
             "pitch":         round(pitch, 2),
@@ -428,12 +488,13 @@ class DetectionThread(threading.Thread):
             "clip_frames":   list(self.clip_buffer),
         }
         try:
+            # AlertEngine writes the event to the DB when it handles it
             self.alert_queue.put_nowait(event)
-            self.db_queue.put_nowait({"action": "INSERT_EVENT", "data": event})
             self.current_alert_level = level
             self.confirm_counter     = 0
-            print(f"[T1] 🚨 ALERT L{level} | "
-                  f"EAR={ear:.3f} PERCLOS={fatigue_score:.2f}")
+            print(f"[T1] 🚨 ALERT L{level} ({reason}) | "
+                  f"EAR={ear:.3f} MAR={mar:.2f} PITCH={pitch:.1f} "
+                  f"SCORE={fatigue_score:.2f}")
         except Exception:
             pass
 
@@ -534,6 +595,11 @@ class DetectionThread(threading.Thread):
             pass
 
     
+    # Drop the stale landmark overlay so the UI falls back to the live frame
+    def _clear_annotated(self):
+        with self.frame_lock:
+            self.frame_buffer["annotated"] = None
+
     # FPS
     
     def _update_fps(self):

@@ -3,7 +3,7 @@
 # ⚠️ FatigueGuard
 ### AI-Powered Operator Fatigue Detection for Heavy Machinery
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10–3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10.13-0097A7?style=for-the-badge&logo=google&logoColor=white)](https://mediapipe.dev)
 [![PyQt5](https://img.shields.io/badge/PyQt5-5.15-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL_Mode-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org)
@@ -608,27 +608,27 @@ pie title Test Coverage — 190 Total Checks
 ### Prerequisites — Run Once
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (creates .venv from uv.lock)
+uv sync
 
 # Download MediaPipe face model (3MB, internet needed once)
-python scripts/download_model.py
+uv run scripts/download_model.py
 
 # Generate Hindi/Marathi audio files
-python scripts/generate_audio.py
+uv run scripts/generate_audio.py
 ```
 
 ### Start the System
 
 ```bash
-python main.py
+uv run main.py
 ```
 
 ### Step-by-Step Demo for Panel
 
 ```mermaid
 flowchart TD
-    A["🚀 python main.py\nDashboard opens"] --> B["👤 Type OP001\nTick Demo Mode\nClick Start Shift"]
+    A["🚀 uv run main.py\nDashboard opens"] --> B["👤 Type OP001\nTick Demo Mode\nClick Start Shift"]
     B --> C["📷 Camera opens\nCalibration runs 10s\nFace landmarks appear"]
     C --> D["✅ MONITORING state\nEAR graph updating live\nPERCLOS gauge active"]
     D --> E1["😴 Close eyes 5s\nL1 beep fires"]
@@ -661,18 +661,20 @@ flowchart TD
 
 ```bash
 # Unit tests (< 10 seconds)
-python tests/test_ear.py
-python tests/test_perclos.py
-python tests/test_audio.py
+uv run tests/test_ear.py
+uv run tests/test_perclos.py
+uv run tests/test_audio.py
+uv run tests/test_crash_recovery.py
+uv run tests/test_alert_triggers.py
 
 # Real-world validation (30 seconds, fast mode)
-python tests/stress/test_realworld_harsh.py --fast
+uv run tests/stress/test_realworld_harsh.py --fast
 
 # 5-hour USP validation (30 seconds, fast mode)
-python tests/stress/test_stress_usp_validation.py --fast
+uv run tests/stress/test_stress_usp_validation.py --fast
 
 # Full 30-minute shift simulation
-python tests/stress/test_stress_normal_eyes.py
+uv run tests/stress/test_stress_normal_eyes.py
 ```
 
 ---
@@ -754,7 +756,8 @@ fatigue_detection/
 ├── 📄 README_PHYSICAL_ARCHITECTURE.md   ← Hardware product design
 ├── ⚙️  config.py                          ← All 40+ system constants
 ├── 🚀 main.py                            ← Application entry point
-├── 📋 requirements.txt                   ← Python dependencies
+├── 📋 pyproject.toml                     ← Dependencies (managed by uv)
+├── 🔒 uv.lock                            ← Pinned dependency lockfile
 │
 ├── core/                                 ← 12 production modules
 │   ├── database.py                       ← SQLite WAL · 5 tables
@@ -784,6 +787,8 @@ fatigue_detection/
 │   ├── test_ear.py                       ← 18 checks
 │   ├── test_perclos.py                   ← 24 checks
 │   ├── test_audio.py                     ← 30 checks
+│   ├── test_crash_recovery.py            ← 38 checks
+│   ├── test_alert_triggers.py            ← 23 checks
 │   └── stress/
 │       ├── scenario_generator.py         ← Synthetic fatigue patterns
 │       ├── stress_harness.py             ← Real-thread injection

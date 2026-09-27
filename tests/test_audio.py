@@ -63,7 +63,7 @@ for fname, desc in required_files:
 
 if not audio_files_ready:
     print("\n    Audio files missing. Run to generate them:")
-    print("     python scripts/generate_audio.py")
+    print("     uv run scripts/generate_audio.py")
     print("  The alert engine will fall back to console output until files exist.")
 
 
@@ -286,7 +286,7 @@ print(f"  RESULTS: {passed}/{total} tests passed")
 if failed == 0:
     print("   ALL TESTS PASSED")
     print("  Alert engine and storage engine verified.")
-    print("  Next: python scripts/generate_audio.py to create MP3 files")
+    print("  Next: uv run scripts/generate_audio.py to create MP3 files")
 else:
     print(f"   {failed} TESTS FAILED")
 print("="*55)

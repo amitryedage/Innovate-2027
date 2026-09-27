@@ -126,7 +126,7 @@ def generate_voice(filepath: str, text: str, lang: str) -> bool:
         tts.save(filepath)
         return True
     except ImportError:
-        print("   gTTS not installed. Run: pip install gTTS")
+        print("   gTTS not installed. Run: uv sync")
         return False
     except Exception as e:
         print(f"   gTTS error: {e}")
@@ -186,7 +186,7 @@ def main():
 
     if failed == 0:
         print("\n  All audio files ready!")
-        print("  Run python main.py — alerts will play in Hindi/Marathi")
+        print("  Run uv run main.py — alerts will play in Hindi/Marathi")
     else:
         print(f"\n    {failed} files failed.")
         print("  Check internet connection (gTTS needs internet once).")
@@ -209,7 +209,7 @@ def main():
             pygame.mixer.quit()
         except ImportError:
             print("    pygame not installed — audio test skipped")
-            print("  Run: pip install pygame")
+            print("  Run: uv sync")
         except Exception as e:
             print(f"    Audio test: {e}")
 
