@@ -5,7 +5,7 @@
 # - EMA (Exponential Moving Average) for smoothing noisy signals
 # - PERCLOS rolling window calculation
 # - Fatigue score calculation based on deviation from baseline
-# Usage: python tests/test_ear.py
+# Usage: uv run tests/test_ear.py
 
 
 import sys, os

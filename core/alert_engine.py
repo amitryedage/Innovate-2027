@@ -14,7 +14,7 @@ from config import (
     AUDIO_CALIBRATION,
     DEFAULT_LANGUAGE,
     COOLDOWN_L1_SEC, COOLDOWN_L2_SEC, COOLDOWN_L3_SEC,
-    ACK_TIMEOUT_SEC,
+    ACK_TIMEOUT_SEC, ALERT_CLEAR_SEC, ALERT_STALE_SEC,
     FAST_ACK_TIME_SEC, FAST_ACK_COUNT,
     FAST_ACK_RAISE, FAST_ACK_MAX_RAISE,
 )
@@ -100,6 +100,12 @@ class AlertEngine(threading.Thread):
             if alert_type == "CAMERA_OBSTRUCTION":
                 self._handle_camera_obstruction(msg)
             elif alert_type.startswith("FATIGUE_L"):
+                age = time.time() - msg.get("timestamp", time.time())
+                if age > ALERT_STALE_SEC:
+                    # Queued while a previous alert was waiting for ack —
+                    # showing it now would be late and misleading
+                    print(f"[T3] Dropping stale {alert_type} ({age:.0f}s old)")
+                    continue
                 self._handle_fatigue_alert(msg)
 
         self._cleanup()
@@ -130,7 +136,11 @@ class AlertEngine(threading.Thread):
         # Update dashboard
         with self.session_lock:
             self.session_state["alert_level"]        = level
+            self.session_state["alert_reason"]       = event.get("reason", "")
             self.session_state["alert_active"]       = True
+            if not event.get("escalated"):
+                self.session_state["alert_count"] = \
+                    self.session_state.get("alert_count", 0) + 1
             self.session_state["alert_fired_time"]   = now
 
         print(f"\n[T3]  ALERT LEVEL {level} | "
@@ -153,11 +163,35 @@ class AlertEngine(threading.Thread):
         self._play_audio(audio_file, level)
 
         # Start ack timer — wait ACK_TIMEOUT_SEC for operator response
-        acked = self._wait_for_ack(level)
+        outcome = self._wait_for_ack(level)
 
         ack_time = time.time() - self.alert_fired_time
 
-        if acked:
+        if outcome == "SUPERSEDED":
+            # A higher-level alert arrived — handle it now instead of
+            # sitting out the rest of this ack window
+            print(f"[T3] ^ L{level} superseded by a higher-level alert")
+            return
+
+        # Timed out but the operator no longer shows fatigue signs —
+        # nothing to escalate (state machine: L1/L2 -> MONITORING on score drop)
+        if outcome == "TIMEOUT" and level < 3 and self._fatigue_cleared():
+            outcome = "CLEARED"
+
+        if outcome == "CLEARED":
+            print(f"[T3]  Alert L{level} cleared — fatigue signs gone "
+                  f"(not acknowledged, {ack_time:.1f}s)")
+            write_audit_log("ALERT_CLEARED", "SYSTEM", session_id,
+                            f"Level {level} cleared without ack after "
+                            f"{ack_time:.1f}s — fatigue signs gone")
+            with self.session_lock:
+                self.session_state["alert_active"] = False
+                self.session_state["alert_level"]  = 0
+                self.session_state["alert_reason"] = ""
+            self.current_level = 0
+            return
+
+        if outcome == "ACKED":
             print(f"[T3]  Alert L{level} acknowledged in {ack_time:.1f}s")
             self._process_ack(level, ack_time, event)
 
@@ -165,36 +199,69 @@ class AlertEngine(threading.Thread):
             with self.session_lock:
                 self.session_state["alert_active"] = False
                 self.session_state["alert_level"]  = 0
+                self.session_state["alert_reason"] = ""
             self.current_level = 0
 
         else:
             # Not acknowledged in time — escalate
-            print(f"[T3]   Alert L{level} NOT acknowledged in {ACK_TIMEOUT_SEC}s — escalating")
+            print(f"[T3]   Alert L{level} NOT acknowledged in {ack_time:.0f}s — escalating")
             self._escalate(level, event)
 
             # Wait for the acknowledgement and oprator for L3 Until he send the message  
 
-    def _wait_for_ack(self, level: int) -> bool:
+    def _wait_for_ack(self, level: int) -> str:
+        """Returns ACKED, TIMEOUT, SUPERSEDED (higher alert queued) or
+        CLEARED (L1/L2 only — fatigue signs gone for ALERT_CLEAR_SEC)."""
         self.ack_event.clear()
 
         if level < 3:
-            # L1 and L2: wait once for ACK_TIMEOUT_SEC
-            acked = self.ack_event.wait(timeout=ACK_TIMEOUT_SEC)
-            return acked
+            # L1 and L2: wait up to ACK_TIMEOUT_SEC, but give way to a
+            # higher-level alert, and stand down once the operator recovers
+            deadline    = time.time() + ACK_TIMEOUT_SEC
+            clear_since = None
+            while time.time() < deadline:
+                if self.ack_event.wait(timeout=0.25):
+                    return "ACKED"
+                if self.shutdown_event.is_set():
+                    return "TIMEOUT"
+                if self._higher_alert_pending(level):
+                    return "SUPERSEDED"
+                if self._fatigue_cleared():
+                    clear_since = clear_since or time.time()
+                    if time.time() - clear_since >= ALERT_CLEAR_SEC:
+                        return "CLEARED"
+                else:
+                    clear_since = None
+            return "TIMEOUT"
         else:
             # L3: repeat audio every 15 seconds until acked
             deadline = time.time() + 120   # max 2 minutes of L3
             while time.time() < deadline:
                 if self.shutdown_event.is_set():
-                    return False
-                acked = self.ack_event.wait(timeout=15.0)
-                if acked:
-                    return True
+                    return "TIMEOUT"
+                if self.ack_event.wait(timeout=15.0):
+                    return "ACKED"
                 # Repeat L3 audio
                 audio_file = self._get_audio_file(3)
                 self._play_audio(audio_file, 3)
                 print("[T3]  L3 repeating — operator not responding!")
-            return False
+            return "TIMEOUT"
+
+    def _fatigue_cleared(self) -> bool:
+        """True if Thread 1 currently sees no fatigue signs.
+        Missing key (no detection feeding us) counts as still fatigued."""
+        with self.session_lock:
+            return self.session_state.get("fatigue_level") == 0
+
+    def _higher_alert_pending(self, level: int) -> bool:
+        """Peek (without removing) for a queued fatigue alert above `level`."""
+        with self.alert_queue.mutex:
+            return any(
+                isinstance(m, dict)
+                and m.get("type", "").startswith("FATIGUE_L")
+                and m.get("level", 0) > level
+                for m in self.alert_queue.queue
+            )
 
     def _escalate(self, current_level: int, event: dict):
         """Escalate alert to next level."""
@@ -208,12 +275,26 @@ class AlertEngine(threading.Thread):
         escalated_event["level"]      = next_level
         escalated_event["type"]       = f"FATIGUE_L{next_level}"
         escalated_event["escalated"]  = True
+        escalated_event["timestamp"]  = time.time()
+        escalated_event.pop("clip_frames", None)   # clip already saved for this incident
+        # Show what is happening now, not what triggered the first alert
+        with self.session_lock:
+            live_reason = self.session_state.get("fatigue_reason")
+        if live_reason:
+            escalated_event["reason"] = live_reason
 
         try:
             self.alert_queue.put_nowait(escalated_event)
         except queue.Full:
-            # Queue full — handle directly
-            self._handle_fatigue_alert(escalated_event)
+            # Queue full — drop the oldest (stale) alert to make room
+            try:
+                self.alert_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.alert_queue.put_nowait(escalated_event)
+            except queue.Full:
+                print("[T3]  Alert queue full — escalation dropped")
              
      #  Process acknowledgement:
      #  - Log ack time to DB
@@ -335,7 +416,7 @@ class AlertEngine(threading.Thread):
 
         if not os.path.exists(filepath):
             print(f"[T3]   Audio file not found: {filepath}")
-            print(f"[T3]    Run: python scripts/generate_audio.py")
+            print(f"[T3]    Run: uv run scripts/generate_audio.py")
             # Console fallback
             print(f" [AUDIO] Level {level} alert (file missing)")
             return
@@ -379,7 +460,7 @@ class AlertEngine(threading.Thread):
             print(f"[T3] All {loaded} audio files preloaded.") #Check that all audio files are preloaded
         elif loaded == 0:
             print(f"[T3]   No audio files found in {AUDIO_DIR}")
-            print(f"[T3]    Run: python scripts/generate_audio.py")
+            print(f"[T3]    Run: uv run scripts/generate_audio.py")
         else:
             print(f"[T3]  {loaded}/{total} audio files preloaded. "
                   f"Run scripts/generate_audio.py for missing files.")

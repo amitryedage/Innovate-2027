@@ -18,14 +18,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from ui.widgets import (
     EARGraphWidget, PERCLOSGauge, AlertStatusWidget,
-    HealthPanel, MetricRow, make_card, label, C_CARD,
+    HealthPanel, MetricRow, make_card, label, caption, set_color,
     RiskScoreWidget, TrendIndicator
 )
+from ui.theme import T, RADIUS
 from ui.login_screen import LoginScreen
 from ui.calibration_screen import CalibrationScreen
 
 from core.state_machine import SystemState
 from core.database import open_session, write_audit_log
+from config import (
+    EAR_CLOSED_NORMAL, EAR_CLOSED_GLASSES, MAR_YAWN_THRESH,
+    PITCH_DROOP_THRESH, FATIGUE_L1_THRESH, FATIGUE_L3_THRESH,
+)
+
+# State badge colour per system state
+STATE_COLORS = {
+    SystemState.MONITORING:       T.success,
+    SystemState.CALIBRATING:      T.primary,
+    SystemState.CRASH_RECOVERY:   T.primary,
+    SystemState.ALERT_L1:         T.warning,
+    SystemState.ALERT_L2:         T.danger,
+    SystemState.ALERT_L3:         T.danger,
+    SystemState.FACE_LOSS:        T.warning,
+    SystemState.TAMPER_ALERT:     T.danger,
+}
 
 
 class DashboardWindow(QMainWindow):
@@ -48,9 +65,8 @@ class DashboardWindow(QMainWindow):
 
         self._calibration_manager = None   # set externally if needed
 
-        self.setWindowTitle("Operator Fatigue Detection System — Phase 1")
-        self.setMinimumSize(1180, 720)
-        self.setStyleSheet("background-color: #0F172A;")
+        self.setWindowTitle("FatigueGuard — Operator Fatigue Detection")
+        self.setMinimumSize(1240, 760)
 
         self._build_ui()
         self._start_refresh_timer()
@@ -89,123 +105,142 @@ class DashboardWindow(QMainWindow):
 
     def _build_monitor_screen(self) -> QWidget:
         root = QWidget()
-        root.setStyleSheet("background-color: #0F172A;")
+        root.setObjectName("screen")
         main_layout = QHBoxLayout(root)
-        main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
 
-        # LEFT: Live video feed 
+        # LEFT: live video, alert banner, live metrics
         left_col = QVBoxLayout()
-        left_col.setSpacing(10)
+        left_col.setSpacing(12)
 
         video_card = make_card()
         video_layout = QVBoxLayout(video_card)
-        video_layout.setContentsMargins(4, 4, 4, 4)
-
-        self.video_label = QLabel()
+        video_layout.setContentsMargins(6, 6, 6, 6)
+        self.video_label = QLabel("Initializing camera...")
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet(
-            "background-color: #000000; border-radius: 8px;"
-        )
-        self.video_label.setText("Initializing camera...")
-        self.video_label.setStyleSheet(
-            "background-color:#000; border-radius:8px; color:#64748B; font-size:13px;"
+            f"background-color:{T.video_bg}; border-radius:{RADIUS}px;"
+            f"color:{T.muted_fg};"
         )
         video_layout.addWidget(self.video_label)
-        left_col.addWidget(video_card, stretch=3)
+        left_col.addWidget(video_card, stretch=1)
 
-        # Alert status bar under video
         self.alert_status = AlertStatusWidget()
         left_col.addWidget(self.alert_status)
 
-        # Metric row under alert bar
         self.metric_row = MetricRow()
         left_col.addWidget(self.metric_row)
 
-        main_layout.addLayout(left_col, stretch=3)
+        main_layout.addLayout(left_col, stretch=1)
 
-        #  RIGHT: Stats panels
+        # RIGHT: session info and trend panels
         right_col = QVBoxLayout()
-        right_col.setSpacing(10)
+        right_col.setSpacing(12)
 
-        # Operator info card
+        # Operator card
         info_card = make_card()
         info_layout = QVBoxLayout(info_card)
-        self.operator_name_lbl = label("Operator: —", size=14, bold=True)
-        self.shift_timer_lbl   = label("Shift time: 00:00:00", size=11,
-                                       color="#94A3B8")
-        self.state_lbl         = label("State: WAITING", size=11,
-                                       color="#3B82F6", bold=True)
+        info_layout.setContentsMargins(16, 14, 16, 14)
+        info_layout.setSpacing(6)
+        info_layout.addWidget(caption("Operator"))
+        self.operator_name_lbl = label("—", size=18, bold=True)
         info_layout.addWidget(self.operator_name_lbl)
-        info_layout.addWidget(self.shift_timer_lbl)
-        info_layout.addWidget(self.state_lbl)
+        status_row = QHBoxLayout()
+        self.shift_timer_lbl = label("00:00:00", size=13, mono_font=True, muted=True)
+        self.state_lbl = QLabel("WAITING")
+        self.state_lbl.setAlignment(Qt.AlignCenter)
+        self._state_color = None
+        status_row.addWidget(self.shift_timer_lbl)
+        status_row.addStretch()
+        status_row.addWidget(self.state_lbl)
+        info_layout.addLayout(status_row)
         right_col.addWidget(info_card)
 
         # EAR graph
         graph_card = make_card()
         graph_layout = QVBoxLayout(graph_card)
-        graph_layout.setContentsMargins(2, 2, 2, 2)
+        graph_layout.setContentsMargins(4, 4, 4, 4)
         self.ear_graph = EARGraphWidget()
         graph_layout.addWidget(self.ear_graph)
         right_col.addWidget(graph_card)
 
-        # PERCLOS gauge + glasses/drowsy flags
+        # PERCLOS gauge + session flags
         gauge_row = QHBoxLayout()
+        gauge_row.setSpacing(12)
         gauge_card = make_card()
         gauge_layout = QVBoxLayout(gauge_card)
+        gauge_layout.setContentsMargins(8, 8, 8, 8)
         self.perclos_gauge = PERCLOSGauge()
         gauge_layout.addWidget(self.perclos_gauge, alignment=Qt.AlignCenter)
         gauge_row.addWidget(gauge_card)
 
         flags_card = make_card()
         flags_layout = QVBoxLayout(flags_card)
-        self.glasses_lbl = label("Glasses mode: No", size=10, color="#94A3B8")
-        self.drowsy_lbl  = label("Drowsy at start: No", size=10, color="#94A3B8")
-        self.events_lbl  = label("Events this shift: 0", size=10, color="#94A3B8")
-        flags_layout.addWidget(self.glasses_lbl)
-        flags_layout.addWidget(self.drowsy_lbl)
-        flags_layout.addWidget(self.events_lbl)
+        flags_layout.setContentsMargins(14, 12, 14, 12)
+        flags_layout.setSpacing(4)
+        self.glasses_lbl = self._flag_row(flags_layout, "Glasses mode")
+        self.drowsy_lbl  = self._flag_row(flags_layout, "Drowsy at start")
+        self.events_lbl  = self._flag_row(flags_layout, "Alerts this shift")
         flags_layout.addStretch()
-        gauge_row.addWidget(flags_card)
-
+        gauge_row.addWidget(flags_card, stretch=1)
         right_col.addLayout(gauge_row)
 
-        # USP Risk score + USP 
+        # Shift risk + fatigue trend
         usp_row = QHBoxLayout()
-        self.risk_widget  = RiskScoreWidget()
+        usp_row.setSpacing(12)
+        risk_card = make_card()
+        risk_layout = QVBoxLayout(risk_card)
+        risk_layout.setContentsMargins(8, 8, 8, 8)
+        self.risk_widget = RiskScoreWidget()
+        risk_layout.addWidget(self.risk_widget, alignment=Qt.AlignCenter)
+        usp_row.addWidget(risk_card)
+        trend_card = make_card()
+        trend_layout = QVBoxLayout(trend_card)
         self.trend_widget = TrendIndicator()
-        usp_row.addWidget(self.risk_widget)
-        usp_row.addWidget(self.trend_widget)
-        usp_row.addStretch()
+        trend_layout.addWidget(self.trend_widget)
+        usp_row.addWidget(trend_card, stretch=1)
         right_col.addLayout(usp_row)
 
-        # System health panel
+        # System health tiles
         self.health_panel = HealthPanel()
         right_col.addWidget(self.health_panel)
 
+        right_col.addStretch()
+
         # End shift button
-        self.end_shift_btn = QPushButton("⏹  End Shift")
+        self.end_shift_btn = QPushButton("End Shift")
+        self.end_shift_btn.setObjectName("destructive")
         self.end_shift_btn.setCursor(Qt.PointingHandCursor)
-        self.end_shift_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #DC2626; color: white;
-                border: none; border-radius: 8px;
-                padding: 10px; font-size: 12px; font-weight: 700;
-            }
-            QPushButton:hover { background-color: #B91C1C; }
-        """)
         self.end_shift_btn.clicked.connect(self._on_end_shift)
         right_col.addWidget(self.end_shift_btn)
 
-        right_col.addStretch()
-
         right_widget = QWidget()
         right_widget.setLayout(right_col)
-        right_widget.setFixedWidth(340)
+        right_widget.setFixedWidth(400)
         main_layout.addWidget(right_widget)
 
         return root
+
+    def _flag_row(self, layout, title: str) -> QLabel:
+        row = QHBoxLayout()
+        row.addWidget(label(title, size=12, muted=True))
+        row.addStretch()
+        value = label("—", size=12, bold=True, mono_font=True)
+        row.addWidget(value)
+        layout.addLayout(row)
+        return value
+
+    def _set_state_badge(self, state):
+        color = STATE_COLORS.get(state, T.muted_fg)
+        self.state_lbl.setText(state.name.replace("_", " "))
+        if color != self._state_color:
+            self._state_color = color
+            self.state_lbl.setStyleSheet(
+                f"color:{color}; border:1px solid {color}; border-radius:{RADIUS}px;"
+                f"padding:2px 8px; font-size:11px; font-weight:700;"
+            )
 
     
     # REFRESH TIMER — polls shared state, updates UI
@@ -223,8 +258,10 @@ class DashboardWindow(QMainWindow):
 
         # Update video frame
         with self.frame_lock:
-            frame = self.frame_buffer.get("annotated") or \
-                    self.frame_buffer.get("frame")
+            # numpy arrays can't be used with `or` — check None explicitly
+            frame = self.frame_buffer.get("annotated")
+            if frame is None:
+                frame = self.frame_buffer.get("frame")
 
         if frame is not None:
             self._display_frame(frame)
@@ -238,6 +275,7 @@ class DashboardWindow(QMainWindow):
             perclos     = self.session_state.get("perclos_current", 0.0)
             baseline    = self.session_state.get("baseline_ear",    0.30)
             alert_level = self.session_state.get("alert_level",     0)
+            alert_reason= self.session_state.get("alert_reason",    "")
             fps         = self.session_state.get("fps",             0)
             brightness  = self.session_state.get("brightness",      100.0)
             free_mb     = self.session_state.get("storage_free_mb", 9999.0)
@@ -249,10 +287,13 @@ class DashboardWindow(QMainWindow):
             glasses     = self.session_state.get("glasses_mode",    False)
             drowsy      = self.session_state.get("drowsy_at_start", False)
 
-        self.ear_graph.update_value(ear, baseline)
+        closed_thresh = EAR_CLOSED_GLASSES if glasses else EAR_CLOSED_NORMAL
+        self.ear_graph.update_value(ear, baseline, closed_thresh)
         self.perclos_gauge.update_value(perclos)
-        self.alert_status.update_level(alert_level)
-        self.metric_row.update_metrics(ear, mar, pitch, score)
+        self.alert_status.update_level(alert_level, alert_reason)
+        self.metric_row.update_metrics(ear, mar, pitch, score, closed_thresh,
+                                       MAR_YAWN_THRESH, PITCH_DROOP_THRESH,
+                                       FATIGUE_L1_THRESH, FATIGUE_L3_THRESH)
         self.health_panel.update_health(fps, brightness, free_mb,
                                         face, demo, thr_raised)
 
@@ -263,6 +304,7 @@ class DashboardWindow(QMainWindow):
             trend_dir  = self.session_state.get('fatigue_trend_slope', 0.0)
             trend_r2   = self.session_state.get('fatigue_trend_r2', 0.0)
             eta_sec    = self.session_state.get('fatigue_eta_sec', None)
+            alerts     = self.session_state.get('alert_count', 0)
         self.risk_widget.update_score(risk_score, risk_band)
         eta_min = eta_sec / 60 if eta_sec else None
         direction = ('rising' if trend_dir > 0.0005 and trend_r2 > 0.4
@@ -270,22 +312,20 @@ class DashboardWindow(QMainWindow):
                      else 'stable')
         self.trend_widget.update_trend(direction, eta_min, trend_r2)
 
-        self.operator_name_lbl.setText(f"Operator: {op_name}")
-        self.state_lbl.setText(f"State: {self.sm.state.name}")
-        # Activate when any opertaor where glass
-        self.glasses_lbl.setText(
-            f"Glasses mode: {'Yes' if glasses else 'No'}"
-        )
-        self.drowsy_lbl.setText(
-            f" Drowsy at start: {'Yes' if drowsy else 'No'}"
-        )
+        self.operator_name_lbl.setText(op_name or "—")
+        self._set_state_badge(self.sm.state)
+        self.glasses_lbl.setText("Yes" if glasses else "No")
+        self.drowsy_lbl.setText("Yes" if drowsy else "No")
+        set_color(self.drowsy_lbl, T.warning if drowsy else T.foreground)
+        self.events_lbl.setText(str(alerts))
+        set_color(self.events_lbl, T.warning if alerts else T.foreground)
 
         if start_time:
             elapsed = time.time() - start_time
             h = int(elapsed // 3600)
             m = int((elapsed % 3600) // 60)
             s = int(elapsed % 60)
-            self.shift_timer_lbl.setText(f"Shift time: {h:02d}:{m:02d}:{s:02d}")
+            self.shift_timer_lbl.setText(f"{h:02d}:{m:02d}:{s:02d}")
 
         # Show / hide calibration overlay
         if self.sm.state == SystemState.CALIBRATING:
@@ -299,7 +339,7 @@ class DashboardWindow(QMainWindow):
                 self.calibration_screen.raise_()
 
             if self._calibration_manager:
-                prog = self._calibration_manager.get_progress()
+                prog = self._calibration_manager.get_calibration_progress()
                 self.calibration_screen.update_progress(
                     prog["progress_pct"], prog["face_pct"],
                     prog["status_message"]
@@ -356,7 +396,7 @@ class DashboardWindow(QMainWindow):
         self.close()
 
     def set_calibration_manager(self, manager):
-        """Allow main.py to attach the live CalibrationManager for progress polling."""
+        """Allow main.py to attach the SessionManager for calibration progress polling."""
         self._calibration_manager = manager
 
     def closeEvent(self, event):

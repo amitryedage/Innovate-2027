@@ -79,6 +79,10 @@ class SessionManager:
                 "demo_mode":         demo_mode,
                 "glasses_mode":      bool(operator["glasses_mode"]),
                 "alert_level":       0,
+                "alert_reason":      "",
+                "fatigue_level":     0,
+                "fatigue_reason":    "",
+                "alert_count":       0,
                 "alert_active":      False,
                 "threshold_raised":  0.0,
                 "perclos_current":   0.0,
@@ -151,6 +155,16 @@ class SessionManager:
         write_audit_log("SESSION_END", op_id or "UNKNOWN",
                         session_id, reason)
 
+        # Leave the active state BEFORE clearing session data below —
+        # Thread 1 reads start_time / baseline every frame while MONITORING.
+        # (CALIBRATING has no SESSION_CLOSING edge; it goes straight to
+        # WAITING_OPERATOR further down.)
+        try:
+            if self.sm.can_transition(SystemState.SESSION_CLOSING):
+                self.sm.transition(SystemState.SESSION_CLOSING)
+        except Exception as e:
+            print(f"[MGR] State transition warning: {e}")
+
         # Reset session_state to neutral (ready for next operator).
         # IMPORTANT: every key that accumulates data during a session
         # MUST be reset here. Missing a key causes cross-session data
@@ -170,6 +184,10 @@ class SessionManager:
                 "perclos_current":   0.0,
                 "fatigue_score":     0.0,
                 "alert_level":       0,
+                "alert_reason":      "",
+                "fatigue_level":     0,
+                "fatigue_reason":    "",
+                "alert_count":       0,
                 "alert_active":      False,
                 "threshold_raised":  0.0,
                 "ack_times":         [],    # MUST reset — accumulates per shift
@@ -180,15 +198,10 @@ class SessionManager:
                 "risk_band":           "GREEN",
             })
 
-        # Route through SESSION_CLOSING before WAITING_OPERATOR
-        # so the state machine graph is respected.
-        # From any active state → SESSION_CLOSING → WAITING_OPERATOR
+        # SESSION_CLOSING (or CALIBRATING) -> WAITING_OPERATOR
         try:
-            if self.sm.state not in (SystemState.WAITING_OPERATOR,
-                                     SystemState.STARTUP,
-                                     SystemState.SHUTTING_DOWN):
-                self.sm.transition(SystemState.SESSION_CLOSING)
-            self.sm.transition(SystemState.WAITING_OPERATOR)
+            if self.sm.state != SystemState.WAITING_OPERATOR:
+                self.sm.transition(SystemState.WAITING_OPERATOR)
         except Exception as e:
             print(f"[MGR] State transition warning: {e}")
             # Force state reset if transition path is unexpected

@@ -35,8 +35,10 @@ TRACKING_CONFIDENCE  = 0.7
 LEFT_EYE  = [33, 160, 158, 133, 153, 144]
 # Right eye landmarks
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-# Mouth landmarks
-MOUTH     = [61, 291, 13, 14, 78, 95, 308, 324]
+# Mouth landmarks (inner lips) — order matters for MAR:
+# [left corner, 3 upper (L->R), right corner, 3 lower (R->L)]
+# so pairs (1,7) (2,6) (3,5) are vertical and (0,4) is mouth width
+MOUTH     = [78, 81, 13, 311, 308, 402, 14, 178]
 # Head pose reference landmarks
 HEAD_POSE = [1, 33, 263, 61, 291, 199]
 
@@ -53,6 +55,8 @@ EMA_ALPHA = 0.15   # smoothing factor — do not change without testing
 EAR_OPEN_NORMAL     = 0.30   # population average for open eyes
 EAR_GLASSES_THRESH  = 0.20   # below this during calibration = glasses mode
 EAR_DROWSY_BASELINE = 0.255  # 15% below population avg = possibly tired at start
+EAR_CLOSED_NORMAL   = 0.22   # smoothed EAR below this = eyes closed (PERCLOS)
+EAR_CLOSED_GLASSES  = 0.18   # same, in glasses mode
 
 # MAR thresholds
 MAR_RESTING_MAX     = 0.35   # normal resting mouth
@@ -79,6 +83,9 @@ WEIGHT_PITCH_GLASSES= 0.35   # pitch becomes primary
 # -------------------------------------------------------------
 PERCLOS_WINDOW_SEC  = 60     # rolling window duration in seconds
 PERCLOS_WINDOW_FRAMES = PERCLOS_WINDOW_SEC * FPS_TARGET  # = 1800 frames
+PERCLOS_MIN_WINDOW_SEC = 15  # until the window holds this much, divide by this —
+                             # a blink in the first second is not "5% closed"
+PERCLOS_MIN_FRAMES    = PERCLOS_MIN_WINDOW_SEC * FPS_TARGET  # = 450 frames
 
 # Fatigue score thresholds — percentage ABOVE personal baseline
 # Example: baseline PERCLOS = 8%, L1 fires when current PERCLOS >= 8 * 1.15 = 9.2%
@@ -103,6 +110,8 @@ COOLDOWN_L2_SEC     = 120    # minimum 120s between L2 alerts
 COOLDOWN_L3_SEC     = 30     # L3 repeats every 30s until acked — dangerous!
 
 ACK_TIMEOUT_SEC     = 30     # operator must ack within 30s or alert escalates
+ALERT_CLEAR_SEC     = 5      # L1/L2 auto-clear once fatigue signs are gone this long
+ALERT_STALE_SEC     = 10     # queued alerts older than this are dropped, not shown late
 
 # False alert learning — safety ceiling
 FAST_ACK_TIME_SEC   = 2.0    # ack faster than this = possibly false alert
@@ -156,6 +165,10 @@ CHECKPOINT_INTERVAL_SEC = 60     # write PERCLOS state to DB every 60 seconds
 WATCHDOG_TIMEOUT_SEC    = 15     # seconds of zero FPS before Thread 1 declared stalled
 WATCHDOG_CHECK_SEC      = 5      # how often watchdog polls FPS
 
+# CRASH RECOVERY
+CRASH_RESUME_MAX_GAP_SEC = 600   # crashed session older than this is closed, not resumed
+CRASH_UNACKED_WINDOW_SEC = 300   # only re-fire alerts raised this close to the crash
+
 
 # PREDICTIVE FATIGUE ENGINE (Based on the opreator working)
 
@@ -164,6 +177,9 @@ PREDICTION_SAMPLE_INTERVAL_SEC = 30   # sample fatigue_score every 30 seconds
 PREDICTION_MIN_SAMPLES       = 8      # need at least 8 samples (4 min) before predicting
 PREDICTION_MIN_R2            = 0.60   # minimum R² for prediction to be reliable
 PREDICTION_COOLDOWN_SEC      = 600    # min 10 minutes between predictive warnings
+
+# UI THEME — "dark" (default, better in a cab at night) or "light"
+UI_THEME                = "dark"
 
 # -------------------------------------------------------------
 # THREAD SETTINGS

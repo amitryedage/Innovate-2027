@@ -5,11 +5,17 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from ui.theme import T, font, mono
+
 
 class CalibrationScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background-color: rgba(15, 23, 42, 235);")
+        # Translucent overlay on top of the monitor screen
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"CalibrationScreen {{ background-color: {T.overlay}; }}")
         self._build_ui()
 
     def _build_ui(self):
@@ -17,36 +23,27 @@ class CalibrationScreen(QWidget):
         outer.setAlignment(Qt.AlignCenter)
 
         card = QFrame()
+        card.setObjectName("card")
         card.setFixedWidth(460)
-        card.setStyleSheet("""
-            QFrame {
-                background-color: #1E293B;
-                border: 2px solid #10B981;
-                border-radius: 16px;
-            }
-        """)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(36, 32, 36, 32)
-        layout.setSpacing(12)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(10)
 
-        icon = QLabel("📐")
-        icon.setStyleSheet("font-size:36px; background:transparent; border:none;")
-        icon.setAlignment(Qt.AlignCenter)
-        layout.addWidget(icon)
+        step = QLabel("CALIBRATION")
+        step.setProperty("caption", True)
+        step.setStyleSheet(f"color:{T.primary}; letter-spacing:3px;")
+        layout.addWidget(step)
 
-        title = QLabel("Calibrating Your Personal Baseline")
-        title.setStyleSheet("color:#F1F5F9; font-size:17px; font-weight:700; "
-                            "background:transparent; border:none;")
-        title.setAlignment(Qt.AlignCenter)
+        title = QLabel("Learning your personal baseline")
+        title.setFont(font(20, QFont.Bold))
         layout.addWidget(title)
 
         self.operator_label = QLabel("Operator: —")
-        self.operator_label.setStyleSheet("color:#94A3B8; font-size:11px; "
-                                          "background:transparent; border:none;")
-        self.operator_label.setAlignment(Qt.AlignCenter)
+        self.operator_label.setProperty("muted", True)
+        self.operator_label.setFont(font(12))
         layout.addWidget(self.operator_label)
 
-        layout.addSpacing(12)
+        layout.addSpacing(10)
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -54,52 +51,28 @@ class CalibrationScreen(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
-        self.progress_bar.setFixedHeight(24)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #0F172A;
-                border: 1px solid #334155;
-                border-radius: 8px;
-                text-align: center;
-                color: #F1F5F9;
-                font-weight: 700;
-                font-size: 11px;
-            }
-            QProgressBar::chunk {
-                background-color: #10B981;
-                border-radius: 7px;
-            }
-        """)
+        self.progress_bar.setFixedHeight(22)
         layout.addWidget(self.progress_bar)
-
-        layout.addSpacing(8)
 
         # Status message
         self.status_label = QLabel("Please look straight at the camera and stay relaxed...")
-        self.status_label.setStyleSheet("color:#CBD5E1; font-size:12px; "
-                                        "background:transparent; border:none;")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setFont(font(13))
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        layout.addSpacing(6)
-
         # Face detection rate indicator
         self.face_label = QLabel("Face detection: —")
-        self.face_label.setStyleSheet("color:#10B981; font-size:11px; font-weight:600; "
-                                      "background:transparent; border:none;")
-        self.face_label.setAlignment(Qt.AlignCenter)
+        self.face_label.setFont(mono(12, QFont.Bold))
         layout.addWidget(self.face_label)
 
-        layout.addSpacing(10)
+        layout.addSpacing(8)
 
         info = QLabel(
-            "This personal baseline ensures fair, accurate fatigue detection — "
-            "your alerts are based on YOUR normal behaviour, not a generic average."
+            "Your alerts are based on YOUR normal behaviour, not a generic "
+            "average — keep looking at the camera as you normally would."
         )
-        info.setStyleSheet("color:#64748B; font-size:9px; "
-                           "background:transparent; border:none;")
-        info.setAlignment(Qt.AlignCenter)
+        info.setProperty("muted", True)
+        info.setFont(font(11))
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -113,15 +86,8 @@ class CalibrationScreen(QWidget):
         self.progress_bar.setValue(int(progress_pct))
         self.status_label.setText(status_message)
 
-        if face_pct >= 80:
-            color, icon = "#10B981", "✅"
-        elif face_pct >= 60:
-            color, icon = "#F59E0B", "⚠️"
-        else:
-            color, icon = "#EF4444", "❌"
-
-        self.face_label.setText(f"{icon} Face detection: {face_pct:.0f}%")
-        self.face_label.setStyleSheet(
-            f"color:{color}; font-size:11px; font-weight:600; "
-            "background:transparent; border:none;"
-        )
+        color = T.success if face_pct >= 80 else T.warning if face_pct >= 60 else T.danger
+        self.face_label.setText(f"Face detection: {face_pct:.0f}%")
+        if self.face_label.property("_color") != color:
+            self.face_label.setProperty("_color", color)
+            self.face_label.setStyleSheet(f"color:{color};")

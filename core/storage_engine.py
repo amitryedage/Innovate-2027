@@ -272,11 +272,9 @@ class StorageEngine(threading.Thread):
                     from core.database import get_connection
                     conn = get_connection()
                     try:
-                        conn.execute("""
-                            UPDATE events SET clip_path=?
-                            WHERE session_id=? AND clip_path IS NULL
-                            ORDER BY timestamp DESC LIMIT 1
-                        """, (filepath, session_id))
+                        conn.execute(
+                            "UPDATE events SET clip_path=? WHERE event_id=?",
+                            (filepath, event_id))
                         conn.commit()
                     finally:
                         conn.close()

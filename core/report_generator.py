@@ -63,7 +63,7 @@ try:
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
-    print("[REPORT] reportlab not installed. Run: pip install reportlab")
+    print("[REPORT] reportlab not installed. Run: uv sync")
 
 # Try importing matplotlib for PERCLOS chart
 try:
